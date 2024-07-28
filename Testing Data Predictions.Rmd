@@ -1,0 +1,47 @@
+---
+title: "Testing Data Predictions"
+author: "Dav King"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r Libraries and Data}
+library(tidyverse)
+library(tidymodels)
+library(FNN)
+library(MASS)
+library(glmnet)
+library(splines)
+library(gam)
+
+testing <- read.csv("data-test.csv")
+testing <- testing %>% 
+  mutate(Factor_Fr = if_else(Fr < Inf, "finite", "infinite")) %>% 
+  mutate(Factor_Fr = factor(Factor_Fr))
+```
+
+```{r Generate Predictions}
+moment_1_pred <- predict(moment_1, testing)
+R_moment_1 <- exp(moment_1_pred)
+
+moment_2_pred <- predict(moment_2, testing)
+R_moment_2 <- exp(moment_2_pred)
+
+testing_mod <- model.matrix(~ log(St) + poly(Re, 2) +
+                                Factor_Fr + poly(Re, 2)*Factor_Fr, testing)[,-1]
+moment_3_pred <- predict(moment_3, moment_3_bestlam, newx = testing_mod)
+R_moment_3 <- exp(moment_3_pred)
+
+moment_4_pred <- predict(moment_4, moment_4_bestlam, newx = testing_mod)
+R_moment_4 <- exp(moment_4_pred)
+```
+
+```{r Put It In A Dataframe}
+pred_out <- data.frame(t(rbind(R_moment_1, R_moment_2, R_moment_3[,1],
+                               R_moment_4[,1])))
+pred_out <- rename(pred_out, c("R_moment_3" = "V3", "R_moment_4" = "V4"))
+```
+
+```{r Now Write It Out}
+write.csv(pred_out, "Test_Data_Predictions.csv")
+```

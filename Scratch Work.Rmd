@@ -1,0 +1,2667 @@
+---
+title: "Scratch Work"
+author: "Dav King"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r Libraries and Data}
+library(tidyverse)
+library(tidymodels)
+library(FNN)
+library(MASS)
+library(glmnet)
+library(splines)
+library(gam)
+
+data <- read.csv("data-train.csv")
+non_inf <- data$Fr < Inf
+non_inf_data <- data %>% 
+  filter(Fr < Inf)
+
+RESCALE_CONSTANT <- 10^10
+data <- data %>% 
+  mutate(New_Fr = if_else(Fr < Inf, Fr, RESCALE_CONSTANT)) %>% 
+  mutate(Factor_Fr = if_else(Fr < Inf, "finite", "infinite")) %>% 
+  mutate(Factor_Fr = factor(Factor_Fr))
+```
+
+# EDA
+
+## BoxCox Testing
+
+```{r EDA-BoxCox}
+boxcox(lm(data$R_moment_1 ~ 1))
+r1_boxcox <- boxcox(lm(data$R_moment_1 ~ 1))
+r1_boxcox$x[which.max(r1_boxcox$y)] # Basically 0
+
+boxcox(lm(data$R_moment_2 ~ 1))
+r2_boxcox <- boxcox(lm(data$R_moment_2 ~ 1))
+r2_boxcox$x[which.max(r2_boxcox$y)] # Basically 0
+
+boxcox(lm(data$R_moment_3 ~ 1))
+r3_boxcox <- boxcox(lm(data$R_moment_3 ~ 1))
+r3_boxcox$x[which.max(r3_boxcox$y)] # Basically 0
+
+boxcox(lm(data$R_moment_4 ~ 1))
+r4_boxcox <- boxcox(lm(data$R_moment_4 ~ 1))
+r4_boxcox$x[which.max(r4_boxcox$y)] # Basically 0
+
+boxcox(lm(data$St ~ 1))
+St_boxcox <- boxcox(lm(data$St ~ 1))
+St_boxcox$x[which.max(St_boxcox$y)] # A bit above 0 but not too bad
+```
+
+## St
+
+```{r EDA-St}
+hist(data$St) # right-skewed, may need log transformation
+hist(log(data$St)) # better, still not ideal
+summary(data$St)
+```
+
+## Re
+
+```{r EDA-Re}
+hist(data$Re) # Three clear clusters, may even treat as factor with cutoffs
+# Note: all integer values
+summary(data$Re)
+data %>% 
+  select(Re) %>% 
+  group_by(Re) %>% 
+  count()
+```
+
+## Fr
+
+```{r EDA-Fr}
+hist(data$Fr) # Two clear groups, again may need to divide
+# Has a lot of infinite values
+summary(data$Fr)
+data %>% 
+  select(Fr) %>% 
+  group_by(Fr) %>% 
+  count()
+```
+
+## Moment 1
+
+```{r EDA-1}
+hist(data$R_moment_1) # Extremely right-skewed
+hist(log(data$R_moment_1)) # Better, still a gap around -4
+summary(data$R_moment_1)
+```
+
+## Moment 2
+
+```{r EDA-2}
+hist(data$R_moment_2) # Much worse skew
+hist(log(data$R_moment_2)) # Pretty good
+summary(data$R_moment_2)
+```
+
+## Moment 3
+
+```{r EDA-3}
+hist(data$R_moment_3) # Good god
+hist(log(data$R_moment_3)) # Better, but less than ideal (still some right skew)
+summary(data$R_moment_3)
+```
+
+## Moment 4
+
+```{r EDA-4}
+hist(data$R_moment_4) # lmao
+hist(log(data$R_moment_4)) # seems okay-ish
+summary(data$R_moment_4)
+```
+
+# Exploratory Modeling
+
+## Moment 1
+
+### St
+
+```{r EM-1-St}
+scatter.smooth(data$St, data$R_moment_1) # There's super weird trends in the prediction
+# Almost like we see three different paths/values for moment 1
+# Could be evidence of an interaction effect? Unclear. Clustering did not appear in EDA.
+
+scatter.smooth(data$St, log(data$R_moment_1)) # Still 3 paths, very distinct from one another
+# All have a sort of exponential distribution as St increases (makes sense)
+# Would have absolutely no way to predict category from St alone here
+
+scatter.smooth(log(data$St), log(data$R_moment_1)) # Almost no trends with St
+# Still 3 clear categories, still not differentiable along the dimension of St
+
+
+summary(lm(data$R_moment_1 ~ data$St)) # Sig
+plot(lm(data$R_moment_1 ~ data$St)) # Fun funky fresh three-path trend in residuals
+# Q-Q plot is the worst I've ever seen
+# Scale-location kinda crazy
+# Fun funky fresh leverage
+
+summary(lm(log(data$R_moment_1) ~ data$St)) # Not sig
+
+summary(lm(log(data$R_moment_1) ~ log(data$St))) # Not sig
+```
+
+Main takeaway: St is not the most relevant variable here.
+
+### Re
+
+```{r EM-1-Re}
+scatter.smooth(data$Re, data$R_moment_1) # Clearly differentiable between two groups - could easily classify
+# with logistic or KNN, except for the difference between classes 2 and 3
+
+scatter.smooth(data$Re, log(data$R_moment_1)) # Incredibly clear differences between groups
+
+ggplot(data, aes(x = R_moment_1)) +
+  geom_histogram(color = "white") +
+  facet_wrap(~Re, scales = "free_x") +
+  theme_bw()
+
+summary(lm(data$R_moment_1 ~ data$Re)) # Very sig but incredibly small beta
+plot(lm(data$R_moment_1 ~ data$Re)) # No
+
+
+
+
+summary(lm(log(data$R_moment_1) ~ data$Re)) # Sig
+plot(lm(log(data$R_moment_1) ~ data$Re)) # Nope
+
+
+
+
+```
+
+Main takeaway: clearly differentiates moment 1 into different categories, could probably classify here. However, if we are looking to extrapolate this beyond the scope of our current parameters (i.e., treat as continuous), we might want to use a log-log transformation or similar. Still looks like a clear trend between categories. Very bad assumptions for linear regression model (don't do that).
+
+### Fr
+
+```{r EM-1-Fr}
+scatter.smooth(data$Fr, data$R_moment_1) # Some differences, not huge ones
+# Probably can't differentiate these beyond random chance
+
+ggplot(data, aes(x = R_moment_1)) +
+  geom_histogram(color = "white") +
+  facet_wrap(~Fr) +
+  theme_bw()
+
+summary(lm(data$R_moment_1 ~ data$New_Fr)) # Not sig
+
+summary(lm(log(data$R_moment_1) ~ data$New_Fr)) # Not sig
+
+summary(lm(data$R_moment_1 ~ data$Factor_Fr)) # Also not sig, weirdly same p val
+
+summary(lm(log(data$R_moment_1) ~ data$Factor_Fr)) # Also not sig, also same p val
+```
+
+Main takeaway: no clear trends, no clear way to differentiate.
+
+### Multivariate Models
+
+```{r EM-1-St-Re}
+summary(lm(data$R_moment_1 ~ data$St + data$Re)) # Both sig
+plot(lm(data$R_moment_1 ~ data$St + data$Re)) # What
+
+summary(lm(data$R_moment_1 ~ log(data$St) + data$Re)) # Somewhat worse model
+#plot(lm(data$R_moment_1 ~ log(data$St) + data$Re)) # Not better
+
+summary(lm(log(data$R_moment_1) ~ data$St + data$Re)) # Super sig, great adj rsq
+plot(lm(log(data$R_moment_1) ~ data$St + data$Re)) # Still messed up
+
+
+summary(lm(data$R_moment_1 ~ data$St + data$Re + data$St*data$Re)) # Very sig
+plot(lm(data$R_moment_1 ~ data$St + data$Re + data$St*data$Re)) # Almost unusable
+
+summary(lm(log(data$R_moment_1) ~ data$St + data$Re + data$St*data$Re)) # Better overall, interaction not sig
+plot(lm(log(data$R_moment_1) ~ data$St + data$Re + data$St*data$Re)) # I've seen worse, except for residuals
+```
+
+```{r EM-1-St-Fr}
+summary(lm(data$R_moment_1 ~ data$St + data$New_Fr)) # Not sig
+
+summary(lm(data$R_moment_1 ~ data$St + data$New_Fr +
+             data$St*data$New_Fr)) # Not sig
+
+summary(lm(log(data$R_moment_1) ~ data$St + data$New_Fr)) # Not sig
+
+summary(lm(log(data$R_moment_1) ~ log(data$St) + data$New_Fr)) # Even less sig
+
+summary(lm(log(data$R_moment_1) ~ log(data$St) + data$New_Fr +
+             log(data$St)*data$New_Fr)) # Getting worse
+
+summary(lm(data$R_moment_1 ~ data$St + data$Factor_Fr)) # Almost sig, St is sig
+
+summary(lm(data$R_moment_1 ~ data$St + data$Factor_Fr + data$St*data$Factor_Fr)) # Worse
+
+summary(lm(log(data$R_moment_1) ~ data$St + data$Factor_Fr)) # Much worse
+
+summary(lm(log(data$R_moment_1) ~ log(data$St) + data$Factor_Fr)) # Much worse
+
+summary(lm(log(data$R_moment_1) ~ log(data$St) + data$Factor_Fr +
+             log(data$St)*data$Factor_Fr)) # Not even close
+```
+
+```{r EM-1-Re-Fr}
+summary(lm(data$R_moment_1 ~ data$Re + data$New_Fr)) # Re sig
+plot(lm(data$R_moment_1 ~ data$Re + data$New_Fr)) # Bad!
+
+summary(lm(log(data$R_moment_1) ~ data$Re + data$New_Fr)) # Re sig, good model
+plot(lm(log(data$R_moment_1) ~ data$Re + data$New_Fr)) # Still not good
+
+summary(lm(log(data$R_moment_1) ~ data$Re + data$New_Fr +
+             data$Re*data$New_Fr)) # Sig interaction
+plot(lm(log(data$R_moment_1) ~ data$Re + data$New_Fr +
+             data$Re*data$New_Fr)) # Still ugly
+
+
+summary(lm(log(data$R_moment_1) ~ data$Re + data$Factor_Fr)) # Re sig, good model
+plot(lm(log(data$R_moment_1) ~ data$Re + data$Factor_Fr)) # Still not good
+
+summary(lm(log(data$R_moment_1) ~ data$Re + data$Factor_Fr +
+             data$Re*data$Factor_Fr)) # Sig interaction
+plot(lm(log(data$R_moment_1) ~ data$Re + data$Factor_Fr +
+             data$Re*data$Factor_Fr)) # Still ugly
+```
+
+
+```{r EM-1-St-Re-Fr}
+summary(lm(R_moment_1 ~ St + Re + New_Fr, data)) # St and Re sig
+plot(lm(R_moment_1 ~ St + Re + New_Fr, data)) # Residuals are no bueno
+
+summary(lm(log(R_moment_1) ~ St + Re + New_Fr, data)) # St and Re sig
+plot(lm(log(R_moment_1) ~ St + Re + New_Fr, data)) # lmao
+
+summary(lm(log(R_moment_1) ~ log(St) + Re + New_Fr, data)) # Approx the same
+plot(lm(log(R_moment_1) ~ log(St) + Re + New_Fr, data)) # Also approx the same
+
+summary(lm(log(R_moment_1) ~ St + Re + New_Fr + St*Re, data)) # Not better
+
+summary(lm(log(R_moment_1) ~ St + Re + New_Fr + St*New_Fr, data)) # Not better
+
+summary(lm(log(R_moment_1) ~ St + Re + New_Fr + Re*New_Fr, data)) # All sig (Fr marginal)
+plot(lm(log(R_moment_1) ~ St + Re + New_Fr + Re*New_Fr, data)) # lord save us
+
+summary(lm(log(R_moment_1) ~ St + Re + New_Fr + St*Re*New_Fr, data)) # Not better
+
+
+
+
+summary(lm(R_moment_1 ~ St + Re + Factor_Fr, data)) # St and Re sig
+plot(lm(R_moment_1 ~ St + Re + Factor_Fr, data)) # Residuals are no bueno
+
+summary(lm(log(R_moment_1) ~ St + Re + Factor_Fr, data)) # St and Re sig
+plot(lm(log(R_moment_1) ~ St + Re + Factor_Fr, data)) # lmao
+
+summary(lm(log(R_moment_1) ~ log(St) + Re + Factor_Fr, data)) # Approx the same
+plot(lm(log(R_moment_1) ~ log(St) + Re + Factor_Fr, data)) # Also approx the same
+
+summary(lm(log(R_moment_1) ~ St + Re + Factor_Fr + St*Re, data)) # Not better
+
+summary(lm(log(R_moment_1) ~ St + Re + Factor_Fr + St*Factor_Fr, data)) # Not better
+
+summary(lm(log(R_moment_1) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr, data)) # All sig (Fr marginal)
+plot(lm(log(R_moment_1) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr, data)) # lord save us
+
+summary(lm(log(R_moment_1) ~ log(St) + Re + Factor_Fr + log(St)*Re*Factor_Fr, data)) # Not better
+```
+
+I would probably test most of these models! Generally looking like we can predict most of the variance ($R^2$ values of ~ .95, $adj R^2$ similar), but plenty of assumptions not met. Would like to run some more robust form of regression to test these assumptions. Re seems very important for this moment.
+
+
+## Moment 2
+
+### St
+
+```{r EM-2-St}
+scatter.smooth(data$St, data$R_moment_2) # Two very different paths here
+
+scatter.smooth(data$St, log(data$R_moment_2)) # Several distinct paths
+
+scatter.smooth(log(data$St), log(data$R_moment_2)) # Increasing, but how would you know which path to take?
+
+
+summary(lm(data$R_moment_2 ~ data$St)) # Not sig
+
+summary(lm(log(data$R_moment_2) ~ data$St)) # Not sig
+
+summary(lm(log(data$R_moment_2) ~ log(data$St))) # Sig
+plot(lm(log(data$R_moment_2) ~ log(data$St))) # Pretty solid
+```
+
+Main takeaway: St is not the most relevant variable here, but when log-transforming it can do things
+
+### Re
+
+```{r EM-2-Re}
+scatter.smooth(data$Re, data$R_moment_2) # You can't draw much from this
+
+scatter.smooth(data$Re, log(data$R_moment_2)) # Some trend, but not differentiable groups
+
+ggplot(data, aes(x = R_moment_2)) +
+  geom_histogram(color = "white") +
+  facet_wrap(~Re, scales = "free_x") +
+  theme_bw() # The higher Re, the closer to zero the data cluster
+
+summary(lm(data$R_moment_2 ~ data$Re)) # Sig, poor rsq
+plot(lm(data$R_moment_2 ~ data$Re)) # No
+
+summary(lm(log(data$R_moment_2) ~ data$Re)) # Sig, better
+plot(lm(log(data$R_moment_2) ~ data$Re)) # Still some clear trends
+```
+
+Main takeaway: there is some trend, probably more direct relationship but less separable categories compared to moment 1.
+
+### Fr
+
+```{r EM-2-Fr}
+scatter.smooth(data$New_Fr, data$R_moment_2) # Nothing clear
+
+ggplot(data, aes(x = R_moment_2)) +
+  geom_histogram(color = "white") +
+  facet_wrap(~Fr, scales = "free_x") +
+  theme_bw() # Somewhat closer to 0 as Fr increases
+
+summary(lm(data$R_moment_2 ~ data$New_Fr)) # Sig
+plot(lm(data$R_moment_2 ~ data$New_Fr)) # Don't think you can linearly regress here
+
+summary(lm(log(data$R_moment_2) ~ data$New_Fr)) # Sig
+plot(lm(log(data$R_moment_2) ~ data$New_Fr)) # There have been worse
+
+summary(lm(data$R_moment_2 ~ data$Factor_Fr)) # Sig
+plot(lm(data$R_moment_2 ~ data$Factor_Fr)) # Don't think you can linearly regress here
+
+summary(lm(log(data$R_moment_2) ~ data$Factor_Fr)) # Sig
+plot(lm(log(data$R_moment_2) ~ data$Factor_Fr)) # There have been worse
+```
+
+Main takeaway: no clear trends, no clear way to differentiate.
+
+### Multivariate Models
+
+```{r EM-2-St-Re}
+summary(lm(data$R_moment_2 ~ data$St + data$Re)) # Re is sig, poor adj rsq
+plot(lm(data$R_moment_2 ~ data$St + data$Re)) # Not yet the worst of the day
+
+summary(lm(log(data$R_moment_2) ~ data$St + data$Re)) # Super sig, better model
+plot(lm(log(data$R_moment_2) ~ data$St + data$Re)) # Almost bearable
+
+
+summary(lm(data$R_moment_2 ~ data$St + data$Re + data$St*data$Re)) # Very sig but much worse model
+
+summary(lm(log(data$R_moment_2) ~ data$St + data$Re + data$St*data$Re)) # Better overall, interaction not sig
+plot(lm(log(data$R_moment_2) ~ data$St + data$Re + data$St*data$Re)) # Pretty solid actually
+
+summary(lm(log(data$R_moment_2) ~ log(data$St) + data$Re)) # Slight improvement
+plot(lm(log(data$R_moment_2) ~ log(data$St) + data$Re)) # Okay-ish
+
+summary(lm(log(data$R_moment_2) ~ log(data$St) + data$Re + log(data$St)*data$Re)) # Slightly better
+plot(lm(log(data$R_moment_2) ~ log(data$St) + data$Re + log(data$St)*data$Re)) # Again, okay-ish
+```
+
+```{r EM-2-St-Fr}
+summary(lm(R_moment_2 ~ St + Factor_Fr, data)) # Sig, only Fr
+plot(lm(R_moment_2 ~ St + Factor_Fr, data)) # Ugly, but not quite as bad
+
+summary(lm(R_moment_2 ~ St + Factor_Fr + St*Factor_Fr, data)) # Sig but no predictors are
+
+summary(lm(log(R_moment_2) ~ St + Factor_Fr, data)) # Sig, St marginal
+plot(lm(log(R_moment_2) ~ St + Factor_Fr, data)) # Kinda eats, relatively speaking
+
+summary(lm(log(R_moment_2) ~ St + Factor_Fr + St*Factor_Fr, data)) # Sig, lower adj rsq
+
+summary(lm(log(R_moment_2) ~ log(St) + Factor_Fr + log(St)*Factor_Fr, data))
+```
+
+```{r EM-2-Re-Fr}
+summary(lm(R_moment_2 ~ Re + Factor_Fr, data)) # Both sig
+plot(lm(R_moment_2 ~ Re + Factor_Fr, data)) # I mean she isn't great
+
+summary(lm(log(R_moment_2) ~ Re + Factor_Fr, data)) # Sig, decent model
+plot(lm(log(R_moment_2) ~ Re + Factor_Fr, data)) # Seen worse
+
+summary(lm(log(R_moment_2) ~ Re + Factor_Fr + Re*Factor_Fr, data)) # Very sig
+plot(lm(log(R_moment_2) ~ Re + Factor_Fr + Re*Factor_Fr, data)) # Almost doesn't violate assumptions
+```
+
+```{r EM-2-St-Re-Fr}
+summary(lm(R_moment_2 ~ St + Re + Factor_Fr, data)) # St not sig
+plot(lm(R_moment_2 ~ St + Re + Factor_Fr, data)) # Residuals are no bueno
+
+summary(lm(log(R_moment_2) ~ St + Re + Factor_Fr, data)) # All sig, solid model
+plot(lm(log(R_moment_2) ~ St + Re + Factor_Fr, data)) # Not too terrible
+
+summary(lm(log(R_moment_2) ~ log(St) + Re + Factor_Fr, data)) # Somewhat better
+plot(lm(log(R_moment_2) ~ log(St) + Re + Factor_Fr, data)) # Eh
+
+summary(lm(log(R_moment_2) ~ log(St) + Re + Factor_Fr + log(St)*Re, data)) # Not better
+
+summary(lm(log(R_moment_2) ~ log(St) + Re + Factor_Fr + log(St)*Factor_Fr, data)) # Not better
+
+summary(lm(log(R_moment_2) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr, data)) # All sig
+plot(lm(log(R_moment_2) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr, data)) # About the same
+
+summary(lm(log(R_moment_2) ~ log(St) + Re + Factor_Fr + log(St)*Re*Factor_Fr, data)) # Not better
+```
+
+Result: Overall, we cannot predict this as effectively as we could for moment 1. However, we can still get some pretty good models. Seems like Re is very important here.
+
+
+## Moment 3
+
+### St
+
+```{r EM-3-St}
+scatter.smooth(data$St, data$R_moment_3) # Two very different paths here
+
+scatter.smooth(data$St, log(data$R_moment_3)) # Several distinct paths
+
+scatter.smooth(log(data$St), log(data$R_moment_3)) # Increasing, but how would you know which path to take?
+
+
+summary(lm(data$R_moment_3 ~ data$St)) # Not sig
+
+summary(lm(log(data$R_moment_3) ~ data$St)) # Not sig
+
+summary(lm(log(data$R_moment_3) ~ log(data$St))) # Sig
+plot(lm(log(data$R_moment_3) ~ log(data$St))) # Wait this kinda eats, might work well with robust regression
+```
+
+Main takeaway: St is not the most relevant variable here, but it seems more important than it did in the other moments.
+
+### Re
+
+```{r EM-3-Re}
+scatter.smooth(data$Re, data$R_moment_3) # You can't draw much from this
+
+scatter.smooth(data$Re, log(data$R_moment_3)) # Minimal trend
+
+ggplot(data, aes(x = R_moment_3)) +
+  geom_histogram(color = "white") +
+  facet_wrap(~Re, scales = "free_x") +
+  theme_bw() # The higher Re, the closer to zero the data cluster
+
+summary(lm(data$R_moment_3 ~ data$Re)) # Sig, poor rsq
+plot(lm(data$R_moment_3 ~ data$Re)) # No
+
+summary(lm(log(data$R_moment_3) ~ data$Re)) # Sig, better
+plot(lm(log(data$R_moment_3) ~ data$Re)) # Still some clear trends, not as bad
+```
+
+Main takeaway: there is some trend, probably more direct relationship but less separable categories compared to moment 1 and 2. Overall getting worse as a predictor in higher order moments.
+
+### Fr
+
+```{r EM-3-Fr}
+scatter.smooth(data$Factor_Fr, data$R_moment_3) # Nothing clear
+
+ggplot(data, aes(x = R_moment_3)) +
+  geom_histogram(color = "white") +
+  facet_wrap(~Fr, scales = "free_x") +
+  theme_bw() # Somewhat closer to 0 as Fr increases
+
+summary(lm(data$R_moment_3 ~ data$Factor_Fr)) # Sig
+plot(lm(data$R_moment_3 ~ data$Factor_Fr)) # Don't think you can linearly regress here
+
+summary(lm(log(data$R_moment_3) ~ data$Factor_Fr)) # Sig
+plot(lm(log(data$R_moment_3) ~ data$Factor_Fr)) # Same idea, not terrible tho
+```
+
+Main takeaway: more important than earlier moments, still hard to do with OLS regression. Might have success in other settings!
+
+### Multivariate Models
+
+```{r EM-3-St-Re}
+summary(lm(data$R_moment_3 ~ data$St + data$Re)) # Re is sig, poor adj rsq
+plot(lm(data$R_moment_3 ~ data$St + data$Re)) # Pretty bad man
+
+summary(lm(log(data$R_moment_3) ~ data$St + data$Re)) # Super sig, better model
+plot(lm(log(data$R_moment_3) ~ data$St + data$Re)) # Almost bearable
+
+
+summary(lm(data$R_moment_3 ~ data$St + data$Re + data$St*data$Re)) # Very sig but much worse model
+
+summary(lm(log(data$R_moment_3) ~ data$St + data$Re + data$St*data$Re)) # Better overall, interaction not sig
+plot(lm(log(data$R_moment_3) ~ data$St + data$Re + data$St*data$Re)) # Meh
+
+summary(lm(log(data$R_moment_3) ~ log(data$St) + data$Re)) # Now we're getting somewhere
+plot(lm(log(data$R_moment_3) ~ log(data$St) + data$Re)) # No improvements
+
+summary(lm(log(R_moment_3) ~ log(St) + Re + log(St)*Re, data)) # Not much better, interaction not sig
+plot(lm(log(R_moment_3) ~ log(St) + Re + log(St)*Re, data)) # Yuck
+```
+
+```{r EM-3-St-Fr}
+summary(lm(R_moment_3 ~ St + Factor_Fr, data)) # Sig, only Fr
+plot(lm(R_moment_3 ~ St + Factor_Fr, data)) # Ugly
+
+#summary(lm(R_moment_3 ~ St + Fr + St*Fr, non_inf_data)) # Sig, about the same
+#plot(lm(R_moment_3 ~ St + Fr + St*Fr, non_inf_data)) # Even worse
+
+summary(lm(log(R_moment_3) ~ St + Factor_Fr, data)) # Slightly better, really about the same
+plot(lm(log(R_moment_3) ~ St + Factor_Fr, data))
+
+summary(lm(log(R_moment_3) ~ log(St) + Factor_Fr, data)) # Some improvement
+plot(lm(log(R_moment_3) ~ log(St) + Factor_Fr, data)) # Not too bad
+
+summary(lm(log(R_moment_3) ~ St + Factor_Fr + St*Factor_Fr, data)) # Not as good
+
+summary(lm(log(R_moment_3) ~ log(St) + Factor_Fr + log(St)*Factor_Fr, data)) # Not quite as good as w/o interaction
+plot(lm(log(R_moment_3) ~ log(St) + Factor_Fr + log(St)*Factor_Fr, data)) # Not bad
+```
+
+```{r EM-3-Re-Fr}
+summary(lm(R_moment_3 ~ Re + Factor_Fr, data)) # Both sig
+plot(lm(R_moment_3 ~ Re + Factor_Fr, data)) # I mean she isn't great
+
+summary(lm(log(R_moment_3) ~ Re + Factor_Fr, data)) # Sig, good model
+plot(lm(log(R_moment_3) ~ Re + Factor_Fr, data)) # It''s better, not good
+
+summary(lm(log(R_moment_3) ~ Re + Factor_Fr + Re*Factor_Fr, data)) # Very sig, still better
+plot(lm(log(R_moment_3) ~ Re + Factor_Fr + Re*Factor_Fr, data)) # I mean she's maybe okay
+```
+
+```{r EM-3-St-Re-Fr}
+summary(lm(R_moment_3 ~ St + Re + Factor_Fr, data)) # St not sig, Fr marginal
+plot(lm(R_moment_3 ~ St + Re + Factor_Fr, data)) # Residuals are no bueno
+
+summary(lm(log(R_moment_3) ~ St + Re + Factor_Fr, data)) # St marginal
+plot(lm(log(R_moment_3) ~ St + Re + Factor_Fr, data)) # I've seen worse
+
+summary(lm(log(R_moment_3) ~ log(St) + Re + Factor_Fr, data)) # Somewhat better
+plot(lm(log(R_moment_3) ~ log(St) + Re + Factor_Fr, data)) # About the same
+
+summary(lm(log(R_moment_3) ~ St + Re + Factor_Fr + St*Re, data)) # Not better
+
+#summary(lm(log(R_moment_3) ~ St + Re + Factor_Fr + St*Fr, non_inf_data)) # Not better
+
+#summary(lm(log(R_moment_3) ~ St + Re + Fr + Re*Fr, non_inf_data)) # All sig
+#plot(lm(log(R_moment_3) ~ St + Re + Fr + Re*Fr, non_inf_data)) # About the same
+
+#summary(lm(log(R_moment_3) ~ St + Re + Fr + St*Re*Fr, non_inf_data)) # About the same
+
+summary(lm(log(R_moment_3) ~ log(St) + Re + Factor_Fr + log(St)*Re, data)) # About the same
+
+summary(lm(log(R_moment_3) ~ log(St) + Re + Factor_Fr + log(St)*Factor_Fr, data)) # About the same
+
+summary(lm(log(R_moment_3) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr, data)) # Best yet
+plot(lm(log(R_moment_3) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr, data)) # Could be worse
+
+summary(lm(log(R_moment_3) ~ log(St) + Re + Factor_Fr + log(St)*Re*Factor_Fr, data)) # About the same
+plot(lm(log(R_moment_3) ~ log(St) + Re + Factor_Fr + log(St)*Re*Factor_Fr, data)) # About the same
+```
+
+Result: Overall, we cannot predict this as effectively as we could for moment 1, but we can model this more effectively than we could for moment 2.
+
+## Moment 4
+
+### St
+
+```{r EM-4-St}
+scatter.smooth(data$St, data$R_moment_4) # Two very different paths here
+
+scatter.smooth(data$St, log(data$R_moment_4)) # Several distinct paths, same as always
+
+scatter.smooth(log(data$St), log(data$R_moment_4)) # Increasing, but how would you know which path to take?
+
+
+summary(lm(data$R_moment_4 ~ data$St)) # Not sig
+
+summary(lm(log(data$R_moment_4) ~ data$St)) # Not sig
+
+summary(lm(log(data$R_moment_4) ~ log(data$St))) # Sig
+plot(lm(log(data$R_moment_4) ~ log(data$St))) # Have definitely seen worse
+```
+
+Main takeaway: St is not the most relevant variable here, but it seems more important than it did in the other moments.
+
+### Re
+
+```{r EM-4-Re}
+scatter.smooth(data$Re, data$R_moment_4) # You can't draw much from this
+
+scatter.smooth(data$Re, log(data$R_moment_4)) # Pretty much flat
+
+ggplot(data, aes(x = R_moment_4)) +
+  geom_histogram(color = "white") +
+  facet_wrap(~Re, scales = "free_x") +
+  theme_bw() # The higher Re, the closer to zero the data cluster
+
+summary(lm(data$R_moment_4 ~ data$Re)) # Sig, poor rsq
+plot(lm(data$R_moment_4 ~ data$Re)) # No
+
+summary(lm(log(data$R_moment_4) ~ data$Re)) # Sig, better
+plot(lm(log(data$R_moment_4) ~ data$Re)) # Still some clear trends, honestly not too bad
+```
+
+Main takeaway: there is a tiny bit of trend here, but I'm honestly shocked that we can get anything from a linear regression here because it really just doesn't look like there's a trend whatsoever in the data.
+
+### Fr
+
+```{r EM-4-Fr}
+scatter.smooth(data$Factor_Fr, data$R_moment_4) # Nothing clear
+
+ggplot(data, aes(x = R_moment_4)) +
+  geom_histogram(color = "white") +
+  facet_wrap(~Fr, scales = "free_x") +
+  theme_bw() # Somewhat closer to 0 as Fr increases, but effect really isn't different between 0.3 and infinity
+
+summary(lm(data$R_moment_4 ~ data$Factor_Fr)) # Sig, terrible rsq
+plot(lm(data$R_moment_4 ~ data$Factor_Fr)) # Don't think you can linearly regress here
+
+summary(lm(log(data$R_moment_4) ~ data$Factor_Fr)) # Sig, slightly better
+plot(lm(log(data$R_moment_4) ~ data$Factor_Fr)) # Honestly not horrific except for scale-location
+```
+
+Main takeaway: it's not as bad as some of the other moments. It's still not good. None of this is.
+
+### Multivariate Models
+
+```{r EM-4-St-Re}
+summary(lm(data$R_moment_4 ~ data$St + data$Re)) # Re is sig, poor adj rsq
+plot(lm(data$R_moment_4 ~ data$St + data$Re)) # Pretty bad man
+
+summary(lm(log(data$R_moment_4) ~ data$St + data$Re)) # Super sig, better model, St still not sig
+plot(lm(log(data$R_moment_4) ~ data$St + data$Re)) # Getting slightly less bad
+
+
+summary(lm(data$R_moment_4 ~ data$St + data$Re + data$St*data$Re)) # Much worse model
+
+summary(lm(log(data$R_moment_4) ~ data$St + data$Re + data$St*data$Re)) # About the same, only Re sig
+plot(lm(log(data$R_moment_4) ~ data$St + data$Re + data$St*data$Re)) # Meh
+
+summary(lm(log(data$R_moment_4) ~ log(data$St) + data$Re)) # Now we're getting somewhere
+plot(lm(log(data$R_moment_4) ~ log(data$St) + data$Re)) # No improvements
+
+summary(lm(log(R_moment_4) ~ log(St) + Re + log(St)*Re, data)) # Not much better, interaction not sig
+plot(lm(log(R_moment_4) ~ log(St) + Re + log(St)*Re, data)) # About the same
+```
+
+```{r EM-4-St-Fr}
+summary(lm(R_moment_4 ~ St + Factor_Fr, data)) # Sig, only Fr
+plot(lm(R_moment_4 ~ St + Factor_Fr, data)) # Ugly
+
+#summary(lm(R_moment_4 ~ St + Factor_Fr + St*Factor_Fr, data)) # Sig overall but no individual predictors
+#plot(lm(R_moment_4 ~ St + Fr + St*Fr, non_inf_data)) # Even worse
+
+summary(lm(log(R_moment_4) ~ St + Factor_Fr, data)) # Slightly better, really about the same
+
+summary(lm(log(R_moment_4) ~ log(St) + Factor_Fr, data)) # Some improvement
+plot(lm(log(R_moment_4) ~ log(St) + Factor_Fr, data)) # Could've sucked worse
+
+#summary(lm(log(R_moment_4) ~ St + Fr + St*Fr, non_inf_data)) # Not as good
+
+summary(lm(log(R_moment_4) ~ log(St) + Factor_Fr + log(St)*Factor_Fr, data)) # Not quite as good as w/o interaction
+plot(lm(log(R_moment_4) ~ log(St) + Factor_Fr + log(St)*Factor_Fr, data)) # Not so awful
+```
+
+```{r EM-4-Re-Fr}
+summary(lm(R_moment_4 ~ Re + Factor_Fr, data)) # Fr marginally sig
+plot(lm(R_moment_4 ~ Re + Factor_Fr, data)) # I mean she isn't great
+
+summary(lm(log(R_moment_4) ~ Re + Factor_Fr, data)) # Sig, better
+plot(lm(log(R_moment_4) ~ Re + Factor_Fr, data)) # Maybe we try robust regression?
+
+summary(lm(log(R_moment_4) ~ Re + Factor_Fr + Re*Factor_Fr, data)) # Very sig, better
+plot(lm(log(R_moment_4) ~ Re + Factor_Fr + Re*Factor_Fr, data)) # Workable, again maybe robust reg
+```
+
+```{r EM-4-St-Re-Fr}
+#summary(lm(R_moment_4 ~ St + Re + Fr, non_inf_data)) # All sig
+#plot(lm(R_moment_4 ~ St + Re + Fr, non_inf_data)) # Residuals are no bueno
+
+summary(lm(log(R_moment_4) ~ St + Re + Factor_Fr, data)) # All sig, solid model
+plot(lm(log(R_moment_4) ~ St + Re + Factor_Fr, data)) # Eh
+
+summary(lm(log(R_moment_4) ~ log(St) + Re + Factor_Fr, data)) # Somewhat better
+plot(lm(log(R_moment_4) ~ log(St) + Re + Factor_Fr, data)) # about a wash
+
+#summary(lm(log(R_moment_4) ~ St + Re + Fr + St*Re, non_inf_data)) # Not better
+
+#summary(lm(log(R_moment_4) ~ St + Re + Fr + St*Fr, non_inf_data)) # Not better
+
+#summary(lm(log(R_moment_4) ~ St + Re + Fr + Re*Fr, non_inf_data)) # All sig
+#plot(lm(log(R_moment_4) ~ St + Re + Fr + Re*Fr, non_inf_data)) # Fishy but maybe usable
+
+#summary(lm(log(R_moment_4) ~ St + Re + Fr + St*Re*Fr, non_inf_data)) # About the same
+
+summary(lm(log(R_moment_4) ~ log(St) + Re + Factor_Fr + log(St)*Re, data)) # About the same
+
+summary(lm(log(R_moment_4) ~ log(St) + Re + Factor_Fr + log(St)*Factor_Fr, data)) # About the same
+
+summary(lm(log(R_moment_4) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr, data)) # Best yet
+plot(lm(log(R_moment_4) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr, data)) # Are they better or do I just want them to be
+
+summary(lm(log(R_moment_4) ~ log(St) + Re + Factor_Fr + log(St)*Re*Factor_Fr, data)) # About the same
+plot(lm(log(R_moment_4) ~ log(St) + Re + Factor_Fr + log(St)*Re*Factor_Fr, data)) # Some residuals with problematic leverage
+```
+
+Result: Overall, we cannot predict this as effectively as we could for moment 1, but we can model this more effectively than we could for moment 2 and about the same as for moment 3. The interaction of Re and Fr seems particularly important, especially for Re and Fr.
+
+TO TEST: Can we find some way to designate "take the category if infinity, otherwise take the value"?
+
+
+# Non-Parametric Modeling
+
+## KNN Regression Functions
+
+```{r KNN-Functions}
+knn_out <- function(independent, dependent, k){
+  return(knn.reg(train = independent, y = dependent, test = independent, k = k))
+}
+
+knn_mse <- function(knn_output, truth){
+  return(mean((knn_output$pred - truth)^2))
+}
+
+knn_rsq <- function(knn_output, truth){
+  rss <- sum((truth - knn_output$pred)^2)
+  tss <- sum((truth - mean(truth))^2)
+  return(1 - rss/tss)
+}
+
+best_k <- function(independent, dependent){
+  tester <- seq(1:length(dependent))
+  output <- rep(0, length(dependent))
+  for(i in 1:length(dependent)){
+    output[i] = knn_mse(knn_out(independent, dependent, tester[i]),
+                      dependent)
+  }
+  plot(tester, output)
+  return(which.min(output))
+}
+```
+
+## Moment 1
+
+### St
+
+```{r NPM-1-St}
+best_k(data["St"], data$R_moment_1)
+
+knn_mse(knn_out(data["St"], data$R_moment_1, 7), data$R_moment_1)
+knn_rsq(knn_out(data["St"], data$R_moment_1, 7), data$R_moment_1)
+
+plot(data$St, data$R_moment_1)
+lines(seq(0, 3, length.out = length(data$St)),
+      knn_out(data["St"], data$R_moment_1, 7)$pred)
+
+# This is, like, so much worse
+```
+
+### Re
+
+```{r NPM-1-Re}
+best_k(data["Re"], data$R_moment_1)
+
+knn_mse(knn_out(data["Re"], data$R_moment_1, 7), data$R_moment_1)
+knn_rsq(knn_out(data["Re"], data$R_moment_1, 7), data$R_moment_1)
+
+plot(data$Re, data$R_moment_1)
+lines(seq(0, 3, length.out = length(data$Re)),
+      knn_out(data["Re"], data$R_moment_1, 7)$pred) # Not plotting? Idk
+
+# This is, actually performing well? Super high rsq
+```
+
+### Fr
+
+```{r NPM-1-Fr}
+best_k(data["Factor_Fr"], data$R_moment_1)
+
+knn_mse(knn_out(non_inf_data["Fr"], non_inf_data$R_moment_1, 38),
+        non_inf_data$R_moment_1)
+knn_rsq(knn_out(non_inf_data["Fr"], non_inf_data$R_moment_1, 38),
+        non_inf_data$R_moment_1) # Utterly terrible
+
+plot(non_inf_data$Fr, non_inf_data$R_moment_1)
+lines(seq(0, 3, length.out = length(non_inf_data$Fr)),
+      knn_out(non_inf_data["Fr"], non_inf_data$R_moment_1, 38)$pred) # Lol
+
+# Useless
+```
+
+### Multivariate Models
+
+```{r NPM-1-St-Re}
+best_k(data[c("St", "Re")], data$R_moment_1)
+
+knn_mse(knn_out(data[c("St", "Re")], data$R_moment_1, 2),
+        data$R_moment_1)
+knn_rsq(knn_out(data[c("St", "Re")], data$R_moment_1, 2),
+        data$R_moment_1) # Almost everything?
+
+plot(data$St, data$R_moment_1)
+lines(seq(0, 3, length.out = length(data$St)),
+      knn_out(data[c("St", "Re")], data$R_moment_1, 2)$pred) # Making some sense
+```
+
+
+```{r NPM-1-St-Fr}
+best_k(non_inf_data[c("St", "Fr")], non_inf_data$R_moment_1)
+
+knn_mse(knn_out(non_inf_data[c("St", "Fr")], non_inf_data$R_moment_1, 7),
+        non_inf_data$R_moment_1)
+knn_rsq(knn_out(non_inf_data[c("St", "Fr")], non_inf_data$R_moment_1, 7),
+        non_inf_data$R_moment_1) # Barely anything
+
+plot(non_inf_data$St, non_inf_data$R_moment_1)
+lines(seq(0, 3, length.out = length(non_inf_data$St)),
+      knn_out(non_inf_data[c("St", "Fr")], non_inf_data$R_moment_1, 7)$pred) # Yup
+```
+
+
+```{r NPM-1-Re-Fr}
+best_k(non_inf_data[c("Re", "Fr")], non_inf_data$R_moment_1)
+
+knn_mse(knn_out(non_inf_data[c("Re", "Fr")], non_inf_data$R_moment_1, 3),
+        non_inf_data$R_moment_1)
+knn_rsq(knn_out(non_inf_data[c("Re", "Fr")], non_inf_data$R_moment_1, 3),
+        non_inf_data$R_moment_1) # Pretty good
+
+plot(non_inf_data$Re, non_inf_data$R_moment_1)
+lines(seq(0, 3, length.out = length(non_inf_data$Re)),
+      knn_out(non_inf_data[c("Re", "Fr")], non_inf_data$R_moment_1, 3)$pred) # Still won't plot, still not sure why
+```
+
+```{r NPM-1-St-Re-Fr}
+best_k(non_inf_data[c("St", "Re", "Fr")], non_inf_data$R_moment_1)
+
+knn_mse(knn_out(non_inf_data[c("St", "Re", "Fr")], non_inf_data$R_moment_1, 2),
+        non_inf_data$R_moment_1)
+knn_rsq(knn_out(non_inf_data[c("St", "Re", "Fr")], non_inf_data$R_moment_1, 2),
+        non_inf_data$R_moment_1) # Impressive but that makes sense, not sure if it has predictive validity
+
+plot(non_inf_data$St, non_inf_data$R_moment_1)
+lines(seq(0, 3, length.out = length(non_inf_data$St)),
+      knn_out(non_inf_data[c("St", "Re", "Fr")], non_inf_data$R_moment_1, 2)$pred) # Overfit
+```
+
+Main takeaway: We are doing pretty good explanatory modeling here, but need to do actual cross-validation to confirm whether or not this is legit in terms of prediction.
+
+# Shrinkage Modeling
+
+```{r Shrinkage-Setup}
+pred_1 <- model.matrix(log(R_moment_1) ~ log(St) + Re + Factor_Fr, data)[,-1]
+pred_2 <- model.matrix(log(R_moment_2) ~ log(St) + Re + Factor_Fr, data)[,-1]
+pred_3 <- model.matrix(log(R_moment_3) ~ log(St) + Re + Factor_Fr, data)[,-1]
+pred_4 <- model.matrix(log(R_moment_4) ~ log(St) + Re + Factor_Fr, data)[,-1]
+
+pred_1_int <- model.matrix(log(R_moment_1) ~ log(St) + Re + Factor_Fr +
+                             Re*Factor_Fr, data)[,-1]
+pred_2_int <- model.matrix(log(R_moment_2) ~ log(St) + Re + Factor_Fr +
+                             Re*Factor_Fr, data)[,-1]
+pred_3_int <- model.matrix(log(R_moment_3) ~ log(St) + Re + Factor_Fr +
+                             Re*Factor_Fr, data)[,-1]
+pred_4_int <- model.matrix(log(R_moment_4) ~ log(St) + Re + Factor_Fr +
+                             Re*Factor_Fr, data)[,-1]
+
+resp_1 <- log(data$R_moment_1)
+resp_2 <- log(data$R_moment_2)
+resp_3 <- log(data$R_moment_3)
+resp_4 <- log(data$R_moment_4)
+
+grid <- 10^seq(10, -2, length = 100)
+```
+
+
+## Ridge Regression
+
+### Moment 1
+
+```{r RR-1}
+set.seed(17)
+train <- sample(1:nrow(pred_1), nrow(pred_1)/2)
+test <- (-train)
+resp_1_test <- resp_1[test]
+
+ridge.mod <- glmnet(pred_1[train,], resp_1[train], alpha = 0, lambda = grid, 
+                    thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_1, resp_1, alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+bestlam
+
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_1[test,])
+mean((ridge.pred - resp_1_test)^2) # Very low MSPE
+```
+
+```{r RR-1-Int}
+set.seed(17)
+train <- sample(1:nrow(pred_1_int), nrow(pred_1_int)/2)
+test <- (-train)
+resp_1_test <- resp_1[test]
+
+ridge.mod <- glmnet(pred_1_int[train,], resp_1[train], alpha = 0, lambda = grid, 
+                    thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_1_int, resp_1, alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+bestlam
+
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_1_int[test,])
+mean((ridge.pred - resp_1_test)^2) # Ever so slightly better
+```
+
+
+### Moment 2
+
+```{r RR-2}
+set.seed(17)
+train <- sample(1:nrow(pred_2), nrow(pred_2)/2)
+test <- (-train)
+resp_2_test <- resp_2[test]
+
+ridge.mod <- glmnet(pred_2[train,], resp_2[train], alpha = 0, lambda = grid, 
+                    thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_2, resp_2, alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+bestlam
+
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_2[test,])
+mean((ridge.pred - resp_2_test)^2) # Not as good
+```
+
+```{r RR-2-Int}
+set.seed(17)
+train <- sample(1:nrow(pred_2_int), nrow(pred_2_int)/2)
+test <- (-train)
+resp_2_test <- resp_2[test]
+
+ridge.mod <- glmnet(pred_2_int[train,], resp_2[train], alpha = 0, lambda = grid, 
+                    thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_2_int, resp_2, alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+bestlam
+
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_2_int[test,])
+mean((ridge.pred - resp_2_test)^2) # Notable improvement
+```
+
+
+### Moment 3
+
+```{r RR-3}
+set.seed(17)
+train <- sample(1:nrow(pred_3), nrow(pred_3)/2)
+test <- (-train)
+resp_3_test <- resp_3[test]
+
+ridge.mod <- glmnet(pred_3[train,], resp_3[train], alpha = 0, lambda = grid, 
+                    thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_3, resp_3, alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+bestlam
+
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_3[test,])
+mean((ridge.pred - resp_3_test)^2) # We are getting worse ladies and gentlemen
+```
+
+```{r RR-3-Int}
+set.seed(17)
+train <- sample(1:nrow(pred_3_int), nrow(pred_3_int)/2)
+test <- (-train)
+resp_3_test <- resp_3[test]
+
+ridge.mod <- glmnet(pred_3_int[train,], resp_3[train], alpha = 0, lambda = grid, 
+                    thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_3_int, resp_3, alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+bestlam
+
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_3_int[test,])
+mean((ridge.pred - resp_3_test)^2) # Notable improvement
+```
+
+
+### Moment 4
+
+```{r RR-4}
+set.seed(17)
+train <- sample(1:nrow(pred_4), nrow(pred_4)/2)
+test <- (-train)
+resp_4_test <- resp_4[test]
+
+ridge.mod <- glmnet(pred_4[train,], resp_4[train], alpha = 0, lambda = grid, 
+                    thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_4, resp_4, alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+bestlam
+
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_4[test,])
+mean((ridge.pred - resp_4_test)^2) # well fuck me in the ass and call me a hooker
+```
+
+```{r RR-4-Int}
+set.seed(17)
+train <- sample(1:nrow(pred_4_int), nrow(pred_4_int)/2)
+test <- (-train)
+resp_4_test <- resp_4[test]
+
+ridge.mod <- glmnet(pred_4_int[train,], resp_4[train], alpha = 0, lambda = grid, 
+                    thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_4_int, resp_4, alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+bestlam
+
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_4_int[test,])
+mean((ridge.pred - resp_4_test)^2) # Ever so slightly better
+```
+
+Overall: seems fairly legit, but gets a lot worse as we go up in moments.
+
+
+## Lasso Regression
+
+```{r Redefine-Models}
+pred_1_int <- model.matrix(log(R_moment_1) ~ log(St) + Re + Factor_Fr +
+                             log(St)*Re*Factor_Fr, data)[,-1]
+pred_2_int <- model.matrix(log(R_moment_2) ~ log(St) + Re + Factor_Fr +
+                             log(St)*Re*Factor_Fr, data)[,-1]
+pred_3_int <- model.matrix(log(R_moment_3) ~ log(St) + Re + Factor_Fr +
+                             log(St)*Re*Factor_Fr, data)[,-1]
+pred_4_int <- model.matrix(log(R_moment_4) ~ log(St) + Re + Factor_Fr +
+                             log(St)*Re*Factor_Fr, data)[,-1]
+```
+
+
+### Moment 1
+
+```{r LR-1}
+lasso.mod <- glmnet(pred_1[train,], resp_1[train], alpha = 1, lambda = grid)
+plot(lasso.mod)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_1[train,], resp_1[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_1[test,])
+mean((lasso.pred - resp_1_test)^2) # Way fucken worse
+```
+
+```{r LR-1-Int}
+lasso.mod <- glmnet(pred_1_int[train,], resp_1[train], alpha = 1, lambda = grid)
+plot(lasso.mod)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_1_int[train,], resp_1[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_1_int[test,])
+mean((lasso.pred - resp_1_test)^2) # Still way fucken worse, about the same
+```
+
+
+### Moment 2
+
+```{r LR-2}
+lasso.mod <- glmnet(pred_2[train,], resp_2[train], alpha = 1, lambda = grid)
+plot(lasso.mod)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_2[train,], resp_2[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_2[test,])
+mean((lasso.pred - resp_2_test)^2) # About the same
+```
+
+```{r LR-2-Int}
+lasso.mod <- glmnet(pred_2_int[train,], resp_2[train], alpha = 1, lambda = grid)
+plot(lasso.mod)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_2_int[train,], resp_2[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_2_int[test,])
+mean((lasso.pred - resp_2_test)^2) # About the same
+```
+
+
+### Moment 3
+
+```{r LR-3}
+lasso.mod <- glmnet(pred_3[train,], resp_3[train], alpha = 1, lambda = grid)
+plot(lasso.mod)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_3[train,], resp_3[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_3[test,])
+mean((lasso.pred - resp_3_test)^2) # About the same
+```
+
+```{r LR-3-Int}
+lasso.mod <- glmnet(pred_3_int[train,], resp_3[train], alpha = 1, lambda = grid)
+plot(lasso.mod)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_3_int[train,], resp_3[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_3_int[test,])
+mean((lasso.pred - resp_3_test)^2) # About the same, maybe marginal improvement
+```
+
+
+### Moment 4
+
+```{r LR-4}
+lasso.mod <- glmnet(pred_4[train,], resp_4[train], alpha = 1, lambda = grid)
+plot(lasso.mod)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_4[train,], resp_4[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_4[test,])
+mean((lasso.pred - resp_4_test)^2) # About the same
+```
+
+```{r LR-4-Int}
+lasso.mod <- glmnet(pred_4_int[train,], resp_4[train], alpha = 1, lambda = grid)
+plot(lasso.mod)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_4_int[train,], resp_4[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_4_int[test,])
+mean((lasso.pred - resp_4_test)^2) # About the same, marginally better than ridge
+```
+
+Takeaway: we can get mspe down to a reasonably low level, but it still gets worse as the moments increase.
+
+# Non-Linear Modeling
+
+## Polynomial Modeling
+
+### Moment 1
+
+```{r Poly-1}
+summary(lm(log(R_moment_1) ~ poly(log(St), 5), data)) # Nothing is sig, loser
+
+summary(lm(log(R_moment_1) ~ poly(Re, 2), data)) # Quadratic fit is better
+
+summary(lm(log(R_moment_1) ~ poly(Re, 2) + log(St) + Factor_Fr, data)) # Yo this FUCKS
+
+summary(lm(log(R_moment_1) ~ poly(Re, 2) + poly(log(St), 5) + Factor_Fr, data))
+
+anova(lm(log(R_moment_1) ~ poly(Re, 2) + log(St) + Factor_Fr, data),
+      lm(log(R_moment_1) ~ poly(Re, 2) + poly(log(St), 5) + Factor_Fr, data)) # New model technically better, doubt it would be with CV but we can test it, why the fuck not
+
+summary(lm(log(R_moment_1) ~ poly(Re, 2) + log(St) + Factor_Fr +
+             poly(Re, 2)*Factor_Fr, data)) # We're doing so good you guys but did I build too much flexibility into the model? Time will tell
+```
+
+
+### Moment 2
+
+```{r Poly-2}
+summary(lm(log(R_moment_2) ~ poly(log(St), 5), data)) # Degree 1 is sig, nothing more
+
+summary(lm(log(R_moment_2) ~ poly(Re, 2), data)) # Quadratic fit is better, but barely
+
+summary(lm(log(R_moment_2) ~ poly(Re, 2) + log(St) + Factor_Fr, data)) # Pretty good
+
+summary(lm(log(R_moment_2) ~ poly(Re, 2) + poly(log(St), 5) + Factor_Fr, data))
+
+anova(lm(log(R_moment_2) ~ poly(Re, 2) + log(St) + Factor_Fr, data),
+      lm(log(R_moment_2) ~ poly(Re, 2) + poly(log(St), 5) + Factor_Fr, data)) # Not better
+
+summary(lm(log(R_moment_2) ~ poly(Re, 2) + log(St) + Factor_Fr +
+             poly(Re, 2)*Factor_Fr, data)) # An improvement! But the polynomial is not actually significant, even though I think it's adding something to the model. The more you learn.
+```
+
+
+### Moment 3
+
+```{r Poly-3}
+summary(lm(log(R_moment_3) ~ poly(log(St), 5), data)) # Degree 1 is sig
+
+summary(lm(log(R_moment_3) ~ poly(Re, 2), data)) # Quadratic fit is better, not by much
+
+summary(lm(log(R_moment_3) ~ poly(Re, 2) + log(St) + Factor_Fr, data)) #  Okay-ish
+
+summary(lm(log(R_moment_3) ~ poly(Re, 2) + poly(log(St), 5) + Factor_Fr, data))
+
+anova(lm(log(R_moment_3) ~ poly(Re, 2) + log(St) + Factor_Fr, data),
+      lm(log(R_moment_3) ~ poly(Re, 2) + poly(log(St), 5) + Factor_Fr, data)) # No improvement
+
+summary(lm(log(R_moment_3) ~ poly(Re, 2) + log(St) + Factor_Fr +
+             poly(Re, 2)*Factor_Fr, data)) # Eh? Can't imagine they're all necessary
+```
+
+
+### Moment 4
+
+```{r Poly-4}
+summary(lm(log(R_moment_4) ~ poly(log(St), 5), data)) # Linear is sig
+
+summary(lm(log(R_moment_4) ~ poly(Re, 2), data)) # Quadratic fit is marginally better
+
+summary(lm(log(R_moment_4) ~ poly(Re, 2) + log(St) + Factor_Fr, data)) # aight
+
+summary(lm(log(R_moment_4) ~ poly(Re, 2) + poly(log(St), 5) + Factor_Fr, data))
+
+anova(lm(log(R_moment_4) ~ poly(Re, 2) + log(St) + Factor_Fr, data),
+      lm(log(R_moment_4) ~ poly(Re, 2) + poly(log(St), 5) + Factor_Fr, data)) # No improvement
+
+summary(lm(log(R_moment_4) ~ poly(Re, 2) + log(St) + Factor_Fr +
+             poly(Re, 2)*Factor_Fr, data)) # It's okayyy
+```
+
+## Polynomial but we are gonna shrinkage the expansion idfk bitchass
+
+### Moment 1
+
+```{r Poly-Ridge-1}
+pred_1_poly <- model.matrix(log(R_moment_1) ~ log(St) + poly(Re, 2) +
+                              Factor_Fr, data)[,-1]
+
+ridge.mod <- glmnet(pred_1_poly[train,], resp_1[train], alpha = 0,
+                    lambda = grid, thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_1_poly[train,], resp_1[train], alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_1_poly[test,])
+mean((ridge.pred - resp_1_test)^2) # Will probably need to run CV on dat bih
+
+
+
+pred_1_int_poly <- model.matrix(log(R_moment_1) ~ log(St) + poly(Re, 2) +
+                                  Factor_Fr + poly(Re, 2)*Factor_Fr, data)[,-1]
+
+ridge.mod <- glmnet(pred_1_int_poly[train,], resp_1[train], alpha = 0,
+                    lambda = grid, thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_1_int_poly[train,], resp_1[train], alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_1_int_poly[test,])
+mean((ridge.pred - resp_1_test)^2) # Marginal improvement
+```
+
+```{r Poly-Lasso-1}
+lasso.mod <- glmnet(pred_1_poly[train,], resp_1[train], alpha = 1,
+                    lambda = grid)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_1_poly[train,], resp_1[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_1_poly[test,])
+mean((lasso.pred - resp_1_test)^2) # Marginal improvement
+
+
+
+pred_1_int_poly <- model.matrix(log(R_moment_1) ~ log(St) + poly(Re, 2) +
+                           Factor_Fr + log(St)*poly(Re, 2)*Factor_Fr, data)[,-1]
+
+lasso.mod <- glmnet(pred_1_int_poly[train,], resp_1[train], alpha = 1,
+                    lambda = grid)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_1_int_poly[train,], resp_1[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_1_int_poly[test,])
+mean((lasso.pred - resp_1_test)^2) # Marginal improvement
+```
+
+
+### Moment 2
+
+```{r Poly-Ridge-2}
+pred_2_poly <- model.matrix(log(R_moment_2) ~ log(St) + poly(Re, 2) +
+                              Factor_Fr, data)[,-1]
+
+ridge.mod <- glmnet(pred_2_poly[train,], resp_2[train], alpha = 0,
+                    lambda = grid, thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_2_poly[train,], resp_2[train], alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_2_poly[test,])
+mean((ridge.pred - resp_2_test)^2) # So much better than moment 1
+
+
+
+pred_2_int_poly <- model.matrix(log(R_moment_2) ~ log(St) + poly(Re, 2) +
+                                  Factor_Fr + poly(Re, 2)*Factor_Fr, data)[,-1]
+
+ridge.mod <- glmnet(pred_2_int_poly[train,], resp_2[train], alpha = 0,
+                    lambda = grid, thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_2_int_poly[train,], resp_2[train], alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_2_int_poly[test,])
+mean((ridge.pred - resp_2_test)^2) # Substantial improvement
+```
+
+```{r Poly-Lasso-2}
+lasso.mod <- glmnet(pred_2_poly[train,], resp_2[train], alpha = 1,
+                    lambda = grid)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_2_poly[train,], resp_2[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_2_poly[test,])
+mean((lasso.pred - resp_2_test)^2) # Not quite as good
+
+
+
+pred_2_int_poly <- model.matrix(log(R_moment_2) ~ log(St) + poly(Re, 2) +
+                           Factor_Fr + log(St)*poly(Re, 2)*Factor_Fr, data)[,-1]
+
+lasso.mod <- glmnet(pred_2_int_poly[train,], resp_2[train], alpha = 1,
+                    lambda = grid)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_2_int_poly[train,], resp_2[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_2_int_poly[test,])
+mean((lasso.pred - resp_2_test)^2) # Not as good
+```
+
+
+### Moment 3
+
+```{r Poly-Ridge-3}
+pred_3_poly <- model.matrix(log(R_moment_3) ~ log(St) + poly(Re, 2) +
+                              Factor_Fr, data)[,-1]
+
+ridge.mod <- glmnet(pred_3_poly[train,], resp_3[train], alpha = 0,
+                    lambda = grid, thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_3_poly[train,], resp_3[train], alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_3_poly[test,])
+mean((ridge.pred - resp_3_test)^2) # Better than 1, worse than 2
+
+
+
+pred_3_int_poly <- model.matrix(log(R_moment_3) ~ log(St) + poly(Re, 2) +
+                                  Factor_Fr + poly(Re, 2)*Factor_Fr, data)[,-1]
+
+ridge.mod <- glmnet(pred_3_int_poly[train,], resp_3[train], alpha = 0,
+                    lambda = grid, thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_3_int_poly[train,], resp_3[train], alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_3_int_poly[test,])
+mean((ridge.pred - resp_3_test)^2) # Substantial improvement
+```
+
+```{r Poly-Lasso-3}
+lasso.mod <- glmnet(pred_3_poly[train,], resp_3[train], alpha = 1,
+                    lambda = grid)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_3_poly[train,], resp_3[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_3_poly[test,])
+mean((lasso.pred - resp_3_test)^2) # Not quite as good
+
+
+
+pred_3_int_poly <- model.matrix(log(R_moment_3) ~ log(St) + poly(Re, 2) +
+                           Factor_Fr + log(St)*poly(Re, 2)*Factor_Fr, data)[,-1]
+
+lasso.mod <- glmnet(pred_3_int_poly[train,], resp_3[train], alpha = 1,
+                    lambda = grid)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_3_int_poly[train,], resp_3[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_3_int_poly[test,])
+mean((lasso.pred - resp_3_test)^2) # Def worse
+```
+
+
+### Moment 4
+
+```{r Poly-Ridge-4}
+pred_4_poly <- model.matrix(log(R_moment_4) ~ log(St) + poly(Re, 2) +
+                              Factor_Fr, data)[,-1]
+
+ridge.mod <- glmnet(pred_4_poly[train,], resp_4[train], alpha = 0,
+                    lambda = grid, thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_4_poly[train,], resp_4[train], alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_4_poly[test,])
+mean((ridge.pred - resp_4_test)^2) # Better than 1, worse than 2 and 3
+
+
+
+pred_4_int_poly <- model.matrix(log(R_moment_4) ~ log(St) + poly(Re, 2) +
+                                  Factor_Fr + poly(Re, 2)*Factor_Fr, data)[,-1]
+
+ridge.mod <- glmnet(pred_4_int_poly[train,], resp_4[train], alpha = 0,
+                    lambda = grid, thresh = 1e-12)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_4_int_poly[train,], resp_4[train], alpha = 0)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = pred_4_int_poly[test,])
+mean((ridge.pred - resp_4_test)^2) # Substantial improvement
+```
+
+```{r Poly-Lasso-4}
+lasso.mod <- glmnet(pred_4_poly[train,], resp_4[train], alpha = 1,
+                    lambda = grid)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_4_poly[train,], resp_4[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_4_poly[test,])
+mean((lasso.pred - resp_4_test)^2) # Not quite as good
+
+
+
+pred_4_int_poly <- model.matrix(log(R_moment_4) ~ log(St) + poly(Re, 2) +
+                           Factor_Fr + log(St)*poly(Re, 2)*Factor_Fr, data)[,-1]
+
+lasso.mod <- glmnet(pred_4_int_poly[train,], resp_4[train], alpha = 1,
+                    lambda = grid)
+
+set.seed(1)
+cv.out <- cv.glmnet(pred_4_int_poly[train,], resp_4[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = pred_4_int_poly[test,])
+mean((lasso.pred - resp_4_test)^2) # Def worse
+```
+
+
+
+
+
+# Fuck It We Cross-Validate
+
+```{r CV-Setup}
+set.seed(345)
+folds <- vfold_cv(data, v = 10)
+grid <- 10^seq(10, -2, length = 100)
+```
+
+## Moment 1
+
+### Modeling
+
+```{r CV-Moment 1}
+pred_1 <- model.matrix(log(R_moment_1) ~ log(St) + Re + Factor_Fr, data)[,-1]
+resp_1 <- log(data$R_moment_1)
+pred_1_int <- model.matrix(log(R_moment_1) ~ log(St) + Re + Factor_Fr +
+                             Re*Factor_Fr, data)[,-1]
+pred_1_int_LASSO <- model.matrix(log(R_moment_1) ~ log(St) + Re + Factor_Fr +
+                             log(St)*Re*Factor_Fr, data)[,-1]
+
+pred_1_poly <- model.matrix(log(R_moment_1) ~ log(St) + poly(Re, 2) +
+                              Factor_Fr, data)[,-1]
+pred_1_int_poly <- model.matrix(log(R_moment_1) ~ log(St) + poly(Re, 2) +
+                                  Factor_Fr + poly(Re, 2)*Factor_Fr, data)[,-1]
+pred_1_int_poly_LASSO <- model.matrix(log(R_moment_1) ~ log(St) + poly(Re, 2) +
+                           Factor_Fr + log(St)*poly(Re, 2)*Factor_Fr, data)[,-1]
+
+mom_1_lin_1_mse <- rep(0, 10)
+mom_1_lin_2_mse <- rep(0, 10)
+mom_1_lin_3_mse <- rep(0, 10)
+mom_1_lin_4_mse <- rep(0, 10)
+mom_1_lin_5_mse <- rep(0, 10)
+mom_1_lin_6_mse <- rep(0, 10)
+mom_1_lin_7_mse <- rep(0, 10)
+
+mom_1_ridge_1_mse <- rep(0, 10)
+mom_1_ridge_2_mse <- rep(0, 10)
+mom_1_lasso_1_mse <- rep(0, 10)
+mom_1_lasso_2_mse <- rep(0, 10)
+
+mom_1_poly_1_mse <- rep(0, 10)
+mom_1_poly_2_mse <- rep(0, 10)
+mom_1_poly_3_mse <- rep(0, 10)
+
+mom_1_ridge_3_mse <- rep(0, 10)
+mom_1_ridge_4_mse <- rep(0, 10)
+mom_1_lasso_3_mse <- rep(0, 10)
+mom_1_lasso_4_mse <- rep(0, 10)
+
+mom_1_lasso_5_mse <- rep(0, 10)
+mom_1_lasso_6_mse <- rep(0, 10)
+
+
+for(i in 1:10){
+  indices <- folds$splits[[i]][[2]]
+  correct_indices <- vector("logical", 89)
+  for(j in 1:89){
+    if(j %in% indices){
+      correct_indices[j] = T
+    } else{
+      correct_indices[j] = F
+    }
+  }
+  
+  data_tr <- data[correct_indices,]
+  data_test <- data[!correct_indices,]
+  
+  # Linear
+  mom_1_lin_1 <- lm(log(R_moment_1) ~ log(St) + Re, data_tr)
+  mom_1_lin_1_mse[i] <- mean((predict(mom_1_lin_1, data_test) -
+                                log(data_test$R_moment_1))^2)
+  mom_1_lin_2 <- lm(log(R_moment_1) ~ log(St) + Re + log(St)*Re, data_tr)
+  mom_1_lin_2_mse[i] <- mean((predict(mom_1_lin_2, data_test) -
+                                log(data_test$R_moment_1))^2)
+  mom_1_lin_3 <- lm(log(R_moment_1) ~ Re + Factor_Fr, data_tr)
+  mom_1_lin_3_mse[i] <- mean((predict(mom_1_lin_3, data_test) -
+                                log(data_test$R_moment_1))^2)
+  mom_1_lin_4 <- lm(log(R_moment_1) ~ Re + Factor_Fr + Re*Factor_Fr, data_tr)
+  mom_1_lin_4_mse[i] <- mean((predict(mom_1_lin_4, data_test) -
+                                log(data_test$R_moment_1))^2)
+  mom_1_lin_5 <- lm(log(R_moment_1) ~ log(St) + Re + Factor_Fr, data_tr)
+  mom_1_lin_5_mse[i] <- mean((predict(mom_1_lin_5, data_test) -
+                                log(data_test$R_moment_1))^2)
+  mom_1_lin_6 <- lm(log(R_moment_1) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr,
+                    data_tr)
+  mom_1_lin_6_mse[i] <- mean((predict(mom_1_lin_6, data_test) -
+                                log(data_test$R_moment_1))^2)
+  mom_1_lin_7 <- lm(log(R_moment_1) ~ log(St) + Re + Factor_Fr + 
+                      log(St)*Re*Factor_Fr, data_tr)
+  mom_1_lin_7_mse[i] <- mean((predict(mom_1_lin_7, data_test) -
+                                log(data_test$R_moment_1))^2)
+  
+  # Shrinkage
+  set.seed(1)
+  mom_1_ridge_1 <- glmnet(pred_1[correct_indices,], resp_1[correct_indices],
+                          alpha = 0, lambda = grid, thresh = 1e-12)
+  cv.out_r1 <- cv.glmnet(pred_1[correct_indices,], resp_1[correct_indices],
+                         alpha = 0)
+  bestlam_r1 <- cv.out_r1$lambda.min
+  ridge.pred_r1 <- predict(mom_1_ridge_1, s = bestlam_r1,
+                           newx = pred_1[!correct_indices,])
+  mom_1_ridge_1_mse[i] <- mean((ridge.pred_r1 - log(data_test$R_moment_1))^2)
+  
+  
+  mom_1_ridge_2 <- glmnet(pred_1_int[correct_indices,], resp_1[correct_indices],
+                          alpha = 0, lambda = grid,  thresh = 1e-12)
+  cv.out_r2 <- cv.glmnet(pred_1_int[correct_indices,], resp_1[correct_indices],
+                         alpha = 0)
+  bestlam_r2 <- cv.out_r2$lambda.min
+  ridge.pred_r2 <- predict(mom_1_ridge_2, s = bestlam_r2,
+                           newx = pred_1_int[!correct_indices,])
+  mom_1_ridge_2_mse[i] <- mean((ridge.pred_r2 - log(data_test$R_moment_1))^2)
+  
+  
+  set.seed(1)
+  mom_1_lasso_1 <- glmnet(pred_1[correct_indices,], resp_1[correct_indices],
+                          alpha = 1, lambda = grid)
+  cv.out_l1 <- cv.glmnet(pred_1[correct_indices,], resp_1[correct_indices],
+                         alpha = 1)
+  bestlam_l1 <- cv.out_l1$lambda.min
+  lasso.pred_l1 <- predict(mom_1_lasso_1, s = bestlam_l1,
+                           newx = pred_1[!correct_indices,])
+  mom_1_lasso_1_mse[i] <- mean((lasso.pred_l1 - log(data_test$R_moment_1))^2)
+  
+  mom_1_lasso_2 <- glmnet(pred_1_int_LASSO[correct_indices,],
+                          resp_1[correct_indices], alpha = 1, lambda = grid)
+  cv.out_l2 <- cv.glmnet(pred_1_int_LASSO[correct_indices,],
+                         resp_1[correct_indices], alpha = 1)
+  bestlam_l2 <- cv.out_l2$lambda.min
+  lasso.pred_l2 <- predict(mom_1_lasso_2, s = bestlam_l2,
+                           newx = pred_1_int_LASSO[!correct_indices,])
+  mom_1_lasso_2_mse[i] <- mean((lasso.pred_l2 - log(data_test$R_moment_1))^2)
+  
+  # Polynomial
+  mom_1_poly_1 <- lm(log(R_moment_1) ~ poly(Re, 2) + log(St) + Factor_Fr, data_tr)
+  mom_1_poly_1_mse[i] <- mean((predict(mom_1_poly_1, data_test) -
+                                 log(data_test$R_moment_1))^2)
+  mom_1_poly_2 <- lm(log(R_moment_1) ~ poly(Re, 2) + poly(log(St), 5) +
+                       Factor_Fr, data_tr)
+  mom_1_poly_2_mse[i] <- mean((predict(mom_1_poly_2, data_test) - 
+                                 log(data_test$R_moment_1))^2)
+  mom_1_poly_3 <- lm(log(R_moment_1) ~ poly(Re, 2) + log(St) + Factor_Fr +
+                    poly(Re, 2)*Factor_Fr, data_tr)
+  mom_1_poly_3_mse[i] <- mean((predict(mom_1_poly_3, data_test) - 
+                                 log(data_test$R_moment_1))^2)
+  
+  # Polynomial Shrinkage
+  set.seed(1)
+  mom_1_ridge_3 <- glmnet(pred_1_poly[correct_indices,], resp_1[correct_indices],
+                          alpha = 0, lambda = grid, thresh = 1e-12)
+  cv.out_r3 <- cv.glmnet(pred_1_poly[correct_indices,], resp_1[correct_indices],
+                         alpha = 0)
+  bestlam_r3 <- cv.out_r3$lambda.min
+  ridge.pred_r3 <- predict(mom_1_ridge_3, s = bestlam_r3,
+                           newx = pred_1_poly[!correct_indices,])
+  mom_1_ridge_3_mse[i] <- mean((ridge.pred_r3 - log(data_test$R_moment_1))^2)
+  
+  mom_1_ridge_4 <- glmnet(pred_1_int_poly[correct_indices,],
+                          resp_1[correct_indices], alpha = 0,
+                          lambda = grid, thresh = 1e-12)
+  cv.out_r4 <- cv.glmnet(pred_1_int_poly[correct_indices,],
+                         resp_1[correct_indices], alpha = 0)
+  bestlam_r4 <- cv.out_r4$lambda.min
+  ridge.pred_r4 <- predict(mom_1_ridge_4, s = bestlam_r4,
+                           newx = pred_1_int_poly[!correct_indices,])
+  mom_1_ridge_4_mse[i] <- mean((ridge.pred_r4 - log(data_test$R_moment_1))^2)
+  
+  
+  set.seed(1)
+  mom_1_lasso_3 <- glmnet(pred_1_poly[correct_indices,],
+                          resp_1[correct_indices], alpha = 1, lambda = grid)
+  cv.out_l3 <- cv.glmnet(pred_1_poly[correct_indices,],
+                         resp_1[correct_indices], alpha = 1)
+  bestlam_l3 <- cv.out_l3$lambda.min
+  lasso.pred_l3 <- predict(mom_1_lasso_3, s = bestlam_l3,
+                           newx = pred_1_poly[!correct_indices,])
+  mom_1_lasso_3_mse[i] <- mean((lasso.pred_l3 - log(data_test$R_moment_1))^2)
+  
+  mom_1_lasso_4 <- glmnet(pred_1_int_poly_LASSO[correct_indices,],
+                          resp_1[correct_indices], alpha = 1, lambda = grid)
+  cv.out_l4 <- cv.glmnet(pred_1_int_poly_LASSO[correct_indices,],
+                         resp_1[correct_indices], alpha = 1)
+  bestlam_l4 <- cv.out_l4$lambda.min
+  lasso.pred_l4 <- predict(mom_1_lasso_4, s = bestlam_l4,
+                           newx = pred_1_int_poly_LASSO[!correct_indices,])
+  mom_1_lasso_4_mse[i] <- mean((lasso.pred_l4 - log(data_test$R_moment_1))^2)
+  
+  
+  
+  
+  set.seed(1)
+  mom_1_lasso_5 <- glmnet(pred_1_int[correct_indices,],
+                          resp_1[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m1_l5 <- cv.glmnet(pred_1_int[correct_indices,],
+                         resp_1[correct_indices], alpha = 1)
+  bestlam_m1_l5 <- cv.out_m1_l5$lambda.min
+  lasso.pred_m1_l5 <- predict(mom_1_lasso_5, s = bestlam_m1_l5,
+                           newx = pred_1_int[!correct_indices,])
+  mom_1_lasso_5_mse[i] <- mean((lasso.pred_m1_l5 - log(data_test$R_moment_1))^2)
+  
+  mom_1_lasso_6 <- glmnet(pred_1_int_poly[correct_indices,],
+                          resp_1[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m1_l6 <- cv.glmnet(pred_1_int_poly[correct_indices,],
+                         resp_1[correct_indices], alpha = 1)
+  bestlam_m1_l6 <- cv.out_m1_l6$lambda.min
+  lasso.pred_m1_l6 <- predict(mom_1_lasso_6, s = bestlam_m1_l6,
+                           newx = pred_1_int_poly[!correct_indices,])
+  mom_1_lasso_6_mse[i] <- mean((lasso.pred_m1_l6 - log(data_test$R_moment_1))^2)
+
+}
+```
+
+### Output
+
+```{r Mom-1-MSE-Output}
+get_se <- function(mse){
+  ret = 0
+  for(i in 1:10){
+    ret = ret + (mse[i] - mean(mse))^2
+  }
+  return(sqrt(ret / 9))
+}
+get_se(mom_1_lin_1_mse)
+moment_1_mse <- data.frame(t(c(Model = "mom_1_lin_1", MSE = mean(mom_1_lin_1_mse),
+               SD = get_se(mom_1_lin_1_mse))))
+moment_1_mse <- rbind(moment_1_mse,
+                      c("mom_1_lin_2", mean(mom_1_lin_2_mse),
+                                      get_se(mom_1_lin_2_mse)),
+                      c("mom_1_lin_3", mean(mom_1_lin_3_mse),
+                                      get_se(mom_1_lin_3_mse)),
+                      c("mom_1_lin_4", mean(mom_1_lin_4_mse),
+                                      get_se(mom_1_lin_4_mse)),
+                      c("mom_1_lin_5", mean(mom_1_lin_5_mse),
+                                      get_se(mom_1_lin_5_mse)),
+                      c("mom_1_lin_6", mean(mom_1_lin_6_mse),
+                                      get_se(mom_1_lin_6_mse)),
+                      c("mom_1_lin_7", mean(mom_1_lin_7_mse),
+                                      get_se(mom_1_lin_7_mse)),
+                      c("mom_1_ridge_1", mean(mom_1_ridge_1_mse),
+                                      get_se(mom_1_ridge_1_mse)),
+                      c("mom_1_ridge_2", mean(mom_1_ridge_2_mse),
+                                      get_se(mom_1_ridge_2_mse)),
+                      c("mom_1_lasso_1", mean(mom_1_lasso_1_mse),
+                                      get_se(mom_1_lasso_1_mse)),
+                      c("mom_1_lasso_2", mean(mom_1_lasso_2_mse),
+                                      get_se(mom_1_lasso_2_mse)),
+                      c("mom_1_poly_1", mean(mom_1_poly_1_mse),
+                                      get_se(mom_1_poly_1_mse)),
+                      c("mom_1_poly_2", mean(mom_1_poly_2_mse),
+                                      get_se(mom_1_poly_2_mse)),
+                      c("mom_1_poly_3", mean(mom_1_poly_3_mse),
+                                      get_se(mom_1_poly_3_mse)),
+                      c("mom_1_ridge_3", mean(mom_1_ridge_3_mse),
+                                      get_se(mom_1_ridge_3_mse)),
+                      c("mom_1_ridge_4", mean(mom_1_ridge_4_mse),
+                                      get_se(mom_1_ridge_4_mse)),
+                      c("mom_1_lasso_3", mean(mom_1_lasso_3_mse),
+                                      get_se(mom_1_lasso_3_mse)),
+                      c("mom_1_lasso_4", mean(mom_1_lasso_4_mse),
+                                      get_se(mom_1_lasso_4_mse)),
+                      c("mom_1_lasso_5", mean(mom_1_lasso_5_mse),
+                                      get_se(mom_1_lasso_5_mse)),
+                      c("mom_1_lasso_6", mean(mom_1_lasso_6_mse),
+                                      get_se(mom_1_lasso_6_mse)))
+
+moment_1_mse %>% 
+  arrange(MSE) %>% 
+  knitr::kable(digits = 3)
+```
+
+### Selection
+
+mom_1_poly_3 is the best model. Smallest MSE and incredibly small SD.
+
+```{r Mom-1-Final-Model}
+moment_1 <- lm(log(R_moment_1) ~ poly(Re, 2) + log(St) + Factor_Fr + 
+                 poly(Re, 2)*Factor_Fr, data)
+summary(moment_1)
+
+plot(moment_1)
+```
+
+$$ log(\hat{R\_moment\_1}) = -4.943 - 20.661 \times Re + 5.455 \times Re^2 + 0.194 \times log(St) + 0.012 \times infinite \\ + 1.275 \times Re \times infinite - 0.600 \times Re^2 \times infinite $$
+
+F(6, 82) = 4829 (p < .001)
+
+RMSE = 0.1232
+
+$R^2$ = 0.9972
+
+Actually pretty good assumptions! Slight trend in scale-location, otherwise perfectly fine.
+
+
+## Moment 2
+
+### Modeling
+
+```{r CV-Moment 2}
+pred_2 <- model.matrix(log(R_moment_2) ~ log(St) + Re + Factor_Fr, data)[,-1]
+resp_2 <- log(data$R_moment_2)
+pred_2_int <- model.matrix(log(R_moment_2) ~ log(St) + Re + Factor_Fr +
+                             Re*Factor_Fr, data)[,-1]
+pred_2_int_LASSO <- model.matrix(log(R_moment_2) ~ log(St) + Re + Factor_Fr +
+                             log(St)*Re*Factor_Fr, data)[,-1]
+
+pred_2_poly <- model.matrix(log(R_moment_2) ~ log(St) + poly(Re, 2) +
+                              Factor_Fr, data)[,-1]
+pred_2_int_poly <- model.matrix(log(R_moment_2) ~ log(St) + poly(Re, 2) +
+                                  Factor_Fr + poly(Re, 2)*Factor_Fr, data)[,-1]
+pred_2_int_poly_LASSO <- model.matrix(log(R_moment_2) ~ log(St) + poly(Re, 2) +
+                           Factor_Fr + log(St)*poly(Re, 2)*Factor_Fr, data)[,-1]
+
+mom_2_lin_1_mse <- rep(0, 10)
+mom_2_lin_2_mse <- rep(0, 10)
+mom_2_lin_3_mse <- rep(0, 10)
+mom_2_lin_4_mse <- rep(0, 10)
+mom_2_lin_5_mse <- rep(0, 10)
+mom_2_lin_6_mse <- rep(0, 10)
+mom_2_lin_7_mse <- rep(0, 10)
+
+mom_2_ridge_1_mse <- rep(0, 10)
+mom_2_ridge_2_mse <- rep(0, 10)
+mom_2_lasso_1_mse <- rep(0, 10)
+mom_2_lasso_2_mse <- rep(0, 10)
+
+mom_2_poly_1_mse <- rep(0, 10)
+mom_2_poly_2_mse <- rep(0, 10)
+
+mom_2_ridge_3_mse <- rep(0, 10)
+mom_2_ridge_4_mse <- rep(0, 10)
+mom_2_lasso_3_mse <- rep(0, 10)
+mom_2_lasso_4_mse <- rep(0, 10)
+
+mom_2_lasso_5_mse <- rep(0, 10)
+mom_2_lasso_6_mse <- rep(0, 10)
+
+
+for(i in 1:10){
+  indices <- folds$splits[[i]][[2]]
+  correct_indices <- vector("logical", 89)
+  for(j in 1:89){
+    if(j %in% indices){
+      correct_indices[j] = T
+    } else{
+      correct_indices[j] = F
+    }
+  }
+  
+  data_tr <- data[correct_indices,]
+  data_test <- data[!correct_indices,]
+  
+  # Linear
+  mom_2_lin_1 <- lm(log(R_moment_2) ~ log(St) + Re, data_tr)
+  mom_2_lin_1_mse[i] <- mean((predict(mom_2_lin_1, data_test) -
+                                log(data_test$R_moment_2))^2)
+  mom_2_lin_2 <- lm(log(R_moment_2) ~ log(St) + Re + log(St)*Re, data_tr)
+  mom_2_lin_2_mse[i] <- mean((predict(mom_2_lin_2, data_test) -
+                                log(data_test$R_moment_2))^2)
+  mom_2_lin_3 <- lm(log(R_moment_2) ~ Re + Factor_Fr, data_tr)
+  mom_2_lin_3_mse[i] <- mean((predict(mom_2_lin_3, data_test) -
+                                log(data_test$R_moment_2))^2)
+  mom_2_lin_4 <- lm(log(R_moment_2) ~ Re + Factor_Fr + Re*Factor_Fr, data_tr)
+  mom_2_lin_4_mse[i] <- mean((predict(mom_2_lin_4, data_test) -
+                                log(data_test$R_moment_2))^2)
+  mom_2_lin_5 <- lm(log(R_moment_2) ~ log(St) + Re + Factor_Fr, data_tr)
+  mom_2_lin_5_mse[i] <- mean((predict(mom_2_lin_5, data_test) -
+                                log(data_test$R_moment_2))^2)
+  mom_2_lin_6 <- lm(log(R_moment_2) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr,
+                    data_tr)
+  mom_2_lin_6_mse[i] <- mean((predict(mom_2_lin_6, data_test) -
+                                log(data_test$R_moment_2))^2)
+  mom_2_lin_7 <- lm(log(R_moment_2) ~ log(St) + Re + Factor_Fr +
+                      log(St)*Re*Factor_Fr, data_tr)
+  mom_2_lin_7_mse[i] <- mean((predict(mom_2_lin_7, data_test) -
+                                log(data_test$R_moment_2))^2)
+  
+  # Shrinkage
+  set.seed(1)
+  mom_2_ridge_1 <- glmnet(pred_2[correct_indices,], resp_2[correct_indices],
+                          alpha = 0, lambda = grid, thresh = 1e-12)
+  cv.out_m2_r1 <- cv.glmnet(pred_2[correct_indices,], resp_2[correct_indices],
+                         alpha = 0)
+  bestlam_m2_r1 <- cv.out_m2_r1$lambda.min
+  ridge.pred_m2_r1 <- predict(mom_2_ridge_1, s = bestlam_m2_r1,
+                           newx = pred_2[!correct_indices,])
+  mom_2_ridge_1_mse[i] <- mean((ridge.pred_m2_r1 - log(data_test$R_moment_2))^2)
+  
+  
+  mom_2_ridge_2 <- glmnet(pred_2_int[correct_indices,], resp_2[correct_indices],
+                          alpha = 0, lambda = grid,  thresh = 1e-12)
+  cv.out_m2_r2 <- cv.glmnet(pred_2_int[correct_indices,],
+                            resp_2[correct_indices], alpha = 0)
+  bestlam_m2_r2 <- cv.out_m2_r2$lambda.min
+  ridge.pred_m2_r2 <- predict(mom_2_ridge_2, s = bestlam_m2_r2,
+                           newx = pred_2_int[!correct_indices,])
+  mom_2_ridge_2_mse[i] <- mean((ridge.pred_m2_r2 - log(data_test$R_moment_2))^2)
+  
+  
+  set.seed(1)
+  mom_2_lasso_1 <- glmnet(pred_2[correct_indices,], resp_2[correct_indices],
+                          alpha = 1, lambda = grid)
+  cv.out_m2_l1 <- cv.glmnet(pred_2[correct_indices,], resp_2[correct_indices],
+                         alpha = 1)
+  bestlam_m2_l1 <- cv.out_m2_l1$lambda.min
+  lasso.pred_m2_l1 <- predict(mom_2_lasso_1, s = bestlam_m2_l1,
+                           newx = pred_2[!correct_indices,])
+  mom_2_lasso_1_mse[i] <- mean((lasso.pred_m2_l1 - log(data_test$R_moment_2))^2)
+  
+  mom_2_lasso_2 <- glmnet(pred_2_int_LASSO[correct_indices,],
+                          resp_2[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m2_l2 <- cv.glmnet(pred_2_int_LASSO[correct_indices,],
+                         resp_2[correct_indices], alpha = 1)
+  bestlam_m2_l2 <- cv.out_m2_l2$lambda.min
+  lasso.pred_m2_l2 <- predict(mom_2_lasso_2, s = bestlam_m2_l2,
+                           newx = pred_2_int_LASSO[!correct_indices,])
+  mom_2_lasso_2_mse[i] <- mean((lasso.pred_m2_l2 - log(data_test$R_moment_2))^2)
+  
+  # Polynomial
+  mom_2_poly_1 <- lm(log(R_moment_2) ~ poly(Re, 2) + log(St) + Factor_Fr,
+                     data_tr)
+  mom_2_poly_1_mse[i] <- mean((predict(mom_2_poly_1, data_test) -
+                                 log(data_test$R_moment_2))^2)
+  mom_2_poly_2 <- lm(log(R_moment_2) ~ poly(Re, 2) + log(St) + Factor_Fr +
+                    poly(Re, 2)*Factor_Fr, data_tr)
+  mom_2_poly_2_mse[i] <- mean((predict(mom_2_poly_2, data_test) - 
+                                 log(data_test$R_moment_2))^2)
+  
+  # Polynomial Shrinkage
+  set.seed(1)
+  mom_2_ridge_3 <- glmnet(pred_2_poly[correct_indices,], resp_2[correct_indices],
+                          alpha = 0, lambda = grid, thresh = 1e-12)
+  cv.out_m2_r3 <- cv.glmnet(pred_2_poly[correct_indices,],
+                            resp_2[correct_indices], alpha = 0)
+  bestlam_m2_r3 <- cv.out_m2_r3$lambda.min
+  ridge.pred_m2_r3 <- predict(mom_2_ridge_3, s = bestlam_m2_r3,
+                           newx = pred_2_poly[!correct_indices,])
+  mom_2_ridge_3_mse[i] <- mean((ridge.pred_m2_r3 - log(data_test$R_moment_2))^2)
+  
+  mom_2_ridge_4 <- glmnet(pred_2_int_poly[correct_indices,],
+                          resp_2[correct_indices], alpha = 0,
+                          lambda = grid, thresh = 1e-12)
+  cv.out_m2_r4 <- cv.glmnet(pred_2_int_poly[correct_indices,],
+                         resp_2[correct_indices], alpha = 0)
+  bestlam_m2_r4 <- cv.out_m2_r4$lambda.min
+  ridge.pred_m2_r4 <- predict(mom_2_ridge_4, s = bestlam_m2_r4,
+                           newx = pred_2_int_poly[!correct_indices,])
+  mom_2_ridge_4_mse[i] <- mean((ridge.pred_m2_r4 - log(data_test$R_moment_2))^2)
+  
+  
+  set.seed(1)
+  mom_2_lasso_3 <- glmnet(pred_2_poly[correct_indices,],
+                          resp_2[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m2_l3 <- cv.glmnet(pred_2_poly[correct_indices,],
+                         resp_2[correct_indices], alpha = 1)
+  bestlam_m2_l3 <- cv.out_m2_l3$lambda.min
+  lasso.pred_m2_l3 <- predict(mom_2_lasso_3, s = bestlam_m2_l3,
+                           newx = pred_2_poly[!correct_indices,])
+  mom_2_lasso_3_mse[i] <- mean((lasso.pred_m2_l3 - log(data_test$R_moment_2))^2)
+  
+  mom_2_lasso_4 <- glmnet(pred_2_int_poly_LASSO[correct_indices,],
+                          resp_2[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m2_l4 <- cv.glmnet(pred_2_int_poly_LASSO[correct_indices,],
+                         resp_2[correct_indices], alpha = 1)
+  bestlam_m2_l4 <- cv.out_m2_l4$lambda.min
+  lasso.pred_m2_l4 <- predict(mom_2_lasso_4, s = bestlam_m2_l4,
+                           newx = pred_2_int_poly_LASSO[!correct_indices,])
+  mom_2_lasso_4_mse[i] <- mean((lasso.pred_m2_l4 - log(data_test$R_moment_2))^2)
+  
+  
+  
+  
+  set.seed(1)
+  mom_2_lasso_5 <- glmnet(pred_2_int[correct_indices,],
+                          resp_2[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m2_l5 <- cv.glmnet(pred_2_int[correct_indices,],
+                         resp_2[correct_indices], alpha = 1)
+  bestlam_m2_l5 <- cv.out_m2_l5$lambda.min
+  lasso.pred_m2_l5 <- predict(mom_2_lasso_5, s = bestlam_m2_l5,
+                           newx = pred_2_int[!correct_indices,])
+  mom_2_lasso_5_mse[i] <- mean((lasso.pred_m2_l5 - log(data_test$R_moment_2))^2)
+  
+  mom_2_lasso_6 <- glmnet(pred_2_int_poly[correct_indices,],
+                          resp_2[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m2_l6 <- cv.glmnet(pred_2_int_poly[correct_indices,],
+                         resp_2[correct_indices], alpha = 1)
+  bestlam_m2_l6 <- cv.out_m2_l6$lambda.min
+  lasso.pred_m2_l6 <- predict(mom_2_lasso_6, s = bestlam_m2_l6,
+                           newx = pred_2_int_poly[!correct_indices,])
+  mom_2_lasso_6_mse[i] <- mean((lasso.pred_m2_l6 - log(data_test$R_moment_2))^2)
+
+}
+```
+
+### Output
+
+```{r Mom-2-MSE-Output}
+get_se <- function(mse){
+  ret = 0
+  for(i in 1:10){
+    ret = ret + (mse[i] - mean(mse))^2
+  }
+  return(sqrt(ret / 9))
+}
+
+moment_2_mse <- data.frame(t(c(Model = "mom_2_lin_1", MSE = mean(mom_2_lin_1_mse),
+               SD = get_se(mom_2_lin_1_mse))))
+moment_2_mse <- rbind(moment_2_mse,
+                      c("mom_2_lin_2", mean(mom_2_lin_2_mse),
+                                      get_se(mom_2_lin_2_mse)),
+                      c("mom_2_lin_3", mean(mom_2_lin_3_mse),
+                                      get_se(mom_2_lin_3_mse)),
+                      c("mom_2_lin_4", mean(mom_2_lin_4_mse),
+                                      get_se(mom_2_lin_4_mse)),
+                      c("mom_2_lin_5", mean(mom_2_lin_5_mse),
+                                      get_se(mom_2_lin_5_mse)),
+                      c("mom_2_lin_6", mean(mom_2_lin_6_mse),
+                                      get_se(mom_2_lin_6_mse)),
+                      c("mom_2_lin_7", mean(mom_2_lin_7_mse),
+                                      get_se(mom_2_lin_7_mse)),
+                      c("mom_2_ridge_1", mean(mom_2_ridge_1_mse),
+                                      get_se(mom_2_ridge_1_mse)),
+                      c("mom_2_ridge_2", mean(mom_2_ridge_2_mse),
+                                      get_se(mom_2_ridge_2_mse)),
+                      c("mom_2_lasso_1", mean(mom_2_lasso_1_mse),
+                                      get_se(mom_2_lasso_1_mse)),
+                      c("mom_2_lasso_2", mean(mom_2_lasso_2_mse),
+                                      get_se(mom_2_lasso_2_mse)),
+                      c("mom_2_poly_1", mean(mom_2_poly_1_mse),
+                                      get_se(mom_2_poly_1_mse)),
+                      c("mom_2_poly_2", mean(mom_2_poly_2_mse),
+                                      get_se(mom_2_poly_2_mse)),
+                      c("mom_2_ridge_3", mean(mom_2_ridge_3_mse),
+                                      get_se(mom_2_ridge_3_mse)),
+                      c("mom_2_ridge_4", mean(mom_2_ridge_4_mse),
+                                      get_se(mom_2_ridge_4_mse)),
+                      c("mom_2_lasso_3", mean(mom_2_lasso_3_mse),
+                                      get_se(mom_2_lasso_3_mse)),
+                      c("mom_2_lasso_4", mean(mom_2_lasso_4_mse),
+                                      get_se(mom_2_lasso_4_mse)),
+                      c("mom_2_lasso_5", mean(mom_2_lasso_5_mse),
+                                      get_se(mom_2_lasso_5_mse),
+                      c("mom_2_lasso_6", mean(mom_2_lasso_6_mse),
+                                      get_se(mom_2_lasso_6_mse))))
+
+moment_2_mse %>% 
+  arrange(MSE) %>% 
+  knitr::kable(digits = 3)
+```
+
+### Selection
+
+mom_2_poly_2 (which is the equivalent of mom_1_poly_3) is once again the best model. However, our MSE is a lot higher now.
+
+```{r Mom-2-Final-Model}
+moment_2 <- lm(log(R_moment_2) ~ poly(Re, 2) + log(St) + Factor_Fr +
+                    poly(Re, 2)*Factor_Fr, data)
+
+summary(moment_2)
+
+plot(moment_2)
+```
+
+$$ log(\hat{R\_moment\_2}) = -0.722 - 30.048 \times Re + 8.335 \times Re^2 + 0.856 \times log(St) - 1.579 \times infinite \\ + 14.405 \times Re \times infinite - 3.820 \times Re^2 \times infinite $$
+
+F(6, 82) = 36.32
+
+RMSE = 2.011
+
+$R^2$ = 0.7266
+
+Slightly less good on the assumptions - has some weird patterns. Still not too bad overall.
+
+
+## Moment 3
+
+### Modeling
+
+```{r CV-Moment 3}
+pred_3 <- model.matrix(log(R_moment_3) ~ log(St) + Re + Factor_Fr, data)[,-1]
+resp_3 <- log(data$R_moment_3)
+pred_3_int <- model.matrix(log(R_moment_3) ~ log(St) + Re + Factor_Fr +
+                             Re*Factor_Fr, data)[,-1]
+pred_3_int_LASSO <- model.matrix(log(R_moment_3) ~ log(St) + Re + Factor_Fr +
+                             log(St)*Re*Factor_Fr, data)[,-1]
+
+pred_3_poly <- model.matrix(log(R_moment_3) ~ log(St) + poly(Re, 2) +
+                              Factor_Fr, data)[,-1]
+pred_3_int_poly <- model.matrix(log(R_moment_3) ~ log(St) + poly(Re, 2) +
+                                  Factor_Fr + poly(Re, 2)*Factor_Fr, data)[,-1]
+pred_3_int_poly_LASSO <- model.matrix(log(R_moment_3) ~ log(St) + poly(Re, 2) +
+                           Factor_Fr + log(St)*poly(Re, 2)*Factor_Fr, data)[,-1]
+
+mom_3_lin_1_mse <- rep(0, 10)
+mom_3_lin_2_mse <- rep(0, 10)
+mom_3_lin_3_mse <- rep(0, 10)
+mom_3_lin_4_mse <- rep(0, 10)
+mom_3_lin_5_mse <- rep(0, 10)
+mom_3_lin_6_mse <- rep(0, 10)
+mom_3_lin_7_mse <- rep(0, 10)
+
+mom_3_ridge_1_mse <- rep(0, 10)
+mom_3_ridge_2_mse <- rep(0, 10)
+mom_3_lasso_1_mse <- rep(0, 10)
+mom_3_lasso_2_mse <- rep(0, 10)
+
+mom_3_poly_1_mse <- rep(0, 10)
+mom_3_poly_2_mse <- rep(0, 10)
+
+mom_3_ridge_3_mse <- rep(0, 10)
+mom_3_ridge_4_mse <- rep(0, 10)
+mom_3_lasso_3_mse <- rep(0, 10)
+mom_3_lasso_4_mse <- rep(0, 10)
+
+mom_3_lasso_5_mse <- rep(0, 10)
+mom_3_lasso_6_mse <- rep(0, 10)
+
+
+for(i in 1:10){
+  indices <- folds$splits[[i]][[2]]
+  correct_indices <- vector("logical", 89)
+  for(j in 1:89){
+    if(j %in% indices){
+      correct_indices[j] = T
+    } else{
+      correct_indices[j] = F
+    }
+  }
+  
+  data_tr <- data[correct_indices,]
+  data_test <- data[!correct_indices,]
+  
+  # Linear
+  mom_3_lin_1 <- lm(log(R_moment_3) ~ log(St) + Re, data_tr)
+  mom_3_lin_1_mse[i] <- mean((predict(mom_3_lin_1, data_test) -
+                                log(data_test$R_moment_3))^2)
+  mom_3_lin_2 <- lm(log(R_moment_3) ~ log(St) + Re + log(St)*Re, data_tr)
+  mom_3_lin_2_mse[i] <- mean((predict(mom_3_lin_2, data_test) -
+                                log(data_test$R_moment_3))^2)
+  mom_3_lin_3 <- lm(log(R_moment_3) ~ Re + Factor_Fr, data_tr)
+  mom_3_lin_3_mse[i] <- mean((predict(mom_3_lin_3, data_test) -
+                                log(data_test$R_moment_3))^2)
+  mom_3_lin_4 <- lm(log(R_moment_3) ~ Re + Factor_Fr + Re*Factor_Fr, data_tr)
+  mom_3_lin_4_mse[i] <- mean((predict(mom_3_lin_4, data_test) -
+                                log(data_test$R_moment_3))^2)
+  mom_3_lin_5 <- lm(log(R_moment_3) ~ log(St) + Re + Factor_Fr, data_tr)
+  mom_3_lin_5_mse[i] <- mean((predict(mom_3_lin_5, data_test) -
+                                log(data_test$R_moment_3))^2)
+  mom_3_lin_6 <- lm(log(R_moment_3) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr,
+                    data_tr)
+  mom_3_lin_6_mse[i] <- mean((predict(mom_3_lin_6, data_test) -
+                                log(data_test$R_moment_3))^2)
+  mom_3_lin_7 <- lm(log(R_moment_3) ~ log(St) + Re + Factor_Fr +
+                      log(St)*Re*Factor_Fr, data_tr)
+  mom_3_lin_7_mse[i] <- mean((predict(mom_3_lin_7, data_test) -
+                                log(data_test$R_moment_3))^2)
+  
+  # Shrinkage
+  set.seed(1)
+  mom_3_ridge_1 <- glmnet(pred_3[correct_indices,], resp_3[correct_indices],
+                          alpha = 0, lambda = grid, thresh = 1e-12)
+  cv.out_m3_r1 <- cv.glmnet(pred_3[correct_indices,], resp_3[correct_indices],
+                         alpha = 0)
+  bestlam_m3_r1 <- cv.out_m3_r1$lambda.min
+  ridge.pred_m3_r1 <- predict(mom_3_ridge_1, s = bestlam_m3_r1,
+                           newx = pred_3[!correct_indices,])
+  mom_3_ridge_1_mse[i] <- mean((ridge.pred_m3_r1 - log(data_test$R_moment_3))^2)
+  
+  
+  mom_3_ridge_2 <- glmnet(pred_3_int[correct_indices,], resp_3[correct_indices],
+                          alpha = 0, lambda = grid,  thresh = 1e-12)
+  cv.out_m3_r2 <- cv.glmnet(pred_3_int[correct_indices,],
+                            resp_3[correct_indices], alpha = 0)
+  bestlam_m3_r2 <- cv.out_m3_r2$lambda.min
+  ridge.pred_m3_r2 <- predict(mom_3_ridge_2, s = bestlam_m3_r2,
+                           newx = pred_3_int[!correct_indices,])
+  mom_3_ridge_2_mse[i] <- mean((ridge.pred_m3_r2 - log(data_test$R_moment_3))^2)
+  
+  
+  set.seed(1)
+  mom_3_lasso_1 <- glmnet(pred_3[correct_indices,], resp_3[correct_indices],
+                          alpha = 1, lambda = grid)
+  cv.out_m3_l1 <- cv.glmnet(pred_3[correct_indices,], resp_3[correct_indices],
+                         alpha = 1)
+  bestlam_m3_l1 <- cv.out_m3_l1$lambda.min
+  lasso.pred_m3_l1 <- predict(mom_3_lasso_1, s = bestlam_m3_l1,
+                           newx = pred_3[!correct_indices,])
+  mom_3_lasso_1_mse[i] <- mean((lasso.pred_m3_l1 - log(data_test$R_moment_3))^2)
+  
+  mom_3_lasso_2 <- glmnet(pred_3_int_LASSO[correct_indices,],
+                          resp_3[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m3_l2 <- cv.glmnet(pred_3_int_LASSO[correct_indices,],
+                         resp_3[correct_indices], alpha = 1)
+  bestlam_m3_l2 <- cv.out_m3_l2$lambda.min
+  lasso.pred_m3_l2 <- predict(mom_3_lasso_2, s = bestlam_m3_l2,
+                           newx = pred_3_int_LASSO[!correct_indices,])
+  mom_3_lasso_2_mse[i] <- mean((lasso.pred_m3_l2 - log(data_test$R_moment_3))^2)
+  
+  # Polynomial
+  mom_3_poly_1 <- lm(log(R_moment_3) ~ poly(Re, 2) + log(St) + Factor_Fr,
+                     data_tr)
+  mom_3_poly_1_mse[i] <- mean((predict(mom_3_poly_1, data_test) -
+                                 log(data_test$R_moment_3))^2)
+  mom_3_poly_2 <- lm(log(R_moment_3) ~ poly(Re, 2) + log(St) + Factor_Fr +
+                    poly(Re, 2)*Factor_Fr, data_tr)
+  mom_3_poly_2_mse[i] <- mean((predict(mom_3_poly_2, data_test) - 
+                                 log(data_test$R_moment_3))^2)
+  
+  # Polynomial Shrinkage
+  set.seed(1)
+  mom_3_ridge_3 <- glmnet(pred_3_poly[correct_indices,], resp_3[correct_indices],
+                          alpha = 0, lambda = grid, thresh = 1e-12)
+  cv.out_m3_r3 <- cv.glmnet(pred_3_poly[correct_indices,],
+                            resp_3[correct_indices], alpha = 0)
+  bestlam_m3_r3 <- cv.out_m3_r3$lambda.min
+  ridge.pred_m3_r3 <- predict(mom_3_ridge_3, s = bestlam_m3_r3,
+                           newx = pred_3_poly[!correct_indices,])
+  mom_3_ridge_3_mse[i] <- mean((ridge.pred_m3_r3 - log(data_test$R_moment_3))^2)
+  
+  mom_3_ridge_4 <- glmnet(pred_3_int_poly[correct_indices,],
+                          resp_3[correct_indices], alpha = 0,
+                          lambda = grid, thresh = 1e-12)
+  cv.out_m3_r4 <- cv.glmnet(pred_3_int_poly[correct_indices,],
+                         resp_3[correct_indices], alpha = 0)
+  bestlam_m3_r4 <- cv.out_m3_r4$lambda.min
+  ridge.pred_m3_r4 <- predict(mom_3_ridge_4, s = bestlam_m3_r4,
+                           newx = pred_3_int_poly[!correct_indices,])
+  mom_3_ridge_4_mse[i] <- mean((ridge.pred_m3_r4 - log(data_test$R_moment_3))^2)
+  
+  
+  set.seed(1)
+  mom_3_lasso_3 <- glmnet(pred_3_poly[correct_indices,],
+                          resp_3[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m3_l3 <- cv.glmnet(pred_3_poly[correct_indices,],
+                         resp_3[correct_indices], alpha = 1)
+  bestlam_m3_l3 <- cv.out_m3_l3$lambda.min
+  lasso.pred_m3_l3 <- predict(mom_3_lasso_3, s = bestlam_m3_l3,
+                           newx = pred_3_poly[!correct_indices,])
+  mom_3_lasso_3_mse[i] <- mean((lasso.pred_m3_l3 - log(data_test$R_moment_3))^2)
+  
+  mom_3_lasso_4 <- glmnet(pred_3_int_poly_LASSO[correct_indices,],
+                          resp_3[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m3_l4 <- cv.glmnet(pred_3_int_poly_LASSO[correct_indices,],
+                         resp_3[correct_indices], alpha = 1)
+  bestlam_m3_l4 <- cv.out_m3_l4$lambda.min
+  lasso.pred_m3_l4 <- predict(mom_3_lasso_4, s = bestlam_m3_l4,
+                           newx = pred_3_int_poly_LASSO[!correct_indices,])
+  mom_3_lasso_4_mse[i] <- mean((lasso.pred_m3_l4 - log(data_test$R_moment_3))^2)
+  
+  
+  
+  set.seed(1)
+  mom_3_lasso_5 <- glmnet(pred_3_int[correct_indices,],
+                          resp_3[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m3_l5 <- cv.glmnet(pred_3_int[correct_indices,],
+                         resp_3[correct_indices], alpha = 1)
+  bestlam_m3_l5 <- cv.out_m3_l5$lambda.min
+  lasso.pred_m3_l5 <- predict(mom_3_lasso_5, s = bestlam_m3_l5,
+                           newx = pred_3_int[!correct_indices,])
+  mom_3_lasso_5_mse[i] <- mean((lasso.pred_m3_l5 - log(data_test$R_moment_3))^2)
+  
+  mom_3_lasso_6 <- glmnet(pred_3_int_poly[correct_indices,],
+                          resp_3[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m3_l6 <- cv.glmnet(pred_3_int_poly[correct_indices,],
+                         resp_3[correct_indices], alpha = 1)
+  bestlam_m3_l6 <- cv.out_m3_l6$lambda.min
+  lasso.pred_m3_l6 <- predict(mom_3_lasso_6, s = bestlam_m3_l6,
+                           newx = pred_3_int_poly[!correct_indices,])
+  mom_3_lasso_6_mse[i] <- mean((lasso.pred_m3_l6 - log(data_test$R_moment_3))^2)
+
+}
+```
+
+### Output
+
+```{r Mom-3-MSE-Output}
+get_se <- function(mse){
+  ret = 0
+  for(i in 1:10){
+    ret = ret + (mse[i] - mean(mse))^2
+  }
+  return(sqrt(ret / 9))
+}
+
+moment_3_mse <- data.frame(t(c(Model = "mom_3_lin_1", MSE = mean(mom_3_lin_1_mse),
+               SD = get_se(mom_3_lin_1_mse))))
+moment_3_mse <- rbind(moment_3_mse,
+                      c("mom_3_lin_2", mean(mom_3_lin_2_mse),
+                                      get_se(mom_3_lin_2_mse)),
+                      c("mom_3_lin_3", mean(mom_3_lin_3_mse),
+                                      get_se(mom_3_lin_3_mse)),
+                      c("mom_3_lin_4", mean(mom_3_lin_4_mse),
+                                      get_se(mom_3_lin_4_mse)),
+                      c("mom_3_lin_5", mean(mom_3_lin_5_mse),
+                                      get_se(mom_3_lin_5_mse)),
+                      c("mom_3_lin_6", mean(mom_3_lin_6_mse),
+                                      get_se(mom_3_lin_6_mse)),
+                      c("mom_3_lin_7", mean(mom_3_lin_7_mse),
+                                      get_se(mom_3_lin_7_mse)),
+                      c("mom_3_ridge_1", mean(mom_3_ridge_1_mse),
+                                      get_se(mom_3_ridge_1_mse)),
+                      c("mom_3_ridge_2", mean(mom_3_ridge_2_mse),
+                                      get_se(mom_3_ridge_2_mse)),
+                      c("mom_3_lasso_1", mean(mom_3_lasso_1_mse),
+                                      get_se(mom_3_lasso_1_mse)),
+                      c("mom_3_lasso_2", mean(mom_3_lasso_2_mse),
+                                      get_se(mom_3_lasso_2_mse)),
+                      c("mom_3_poly_1", mean(mom_3_poly_1_mse),
+                                      get_se(mom_3_poly_1_mse)),
+                      c("mom_3_poly_2", mean(mom_3_poly_2_mse),
+                                      get_se(mom_3_poly_2_mse)),
+                      c("mom_3_ridge_3", mean(mom_3_ridge_3_mse),
+                                      get_se(mom_3_ridge_3_mse)),
+                      c("mom_3_ridge_4", mean(mom_3_ridge_4_mse),
+                                      get_se(mom_3_ridge_4_mse)),
+                      c("mom_3_lasso_3", mean(mom_3_lasso_3_mse),
+                                      get_se(mom_3_lasso_3_mse)),
+                      c("mom_3_lasso_4", mean(mom_3_lasso_4_mse),
+                                      get_se(mom_3_lasso_4_mse)),
+                      c("mom_3_lasso_5", mean(mom_3_lasso_5_mse),
+                                      get_se(mom_3_lasso_5_mse)),
+                      c("mom_3_lasso_6", mean(mom_3_lasso_6_mse),
+                                      get_se(mom_3_lasso_6_mse)))
+
+moment_3_mse %>% 
+  arrange(MSE) %>% 
+  knitr::kable(digits = 3)
+```
+
+### Selection
+
+Here, mom_3_lasso_6 ever so slightly edges out mom_3_poly_2.
+
+```{r Moment-3-Final-Model}
+set.seed(325)
+moment_3_cv <- cv.glmnet(pred_3_int_poly, resp_3, alpha = 1)
+moment_3_bestlam <- moment_3_cv$lambda.min
+
+moment_3 <- glmnet(pred_3_int_poly, resp_3, alpha = 1,
+                   lambda = moment_3_bestlam)
+
+coef(moment_3)
+
+moment_3_predictions <- predict(moment_3, moment_3_bestlam,
+                                newx = pred_3_int_poly)
+
+tss <- sum((log(data$R_moment_3) - mean(log(data$R_moment_3)))^2)
+rss <- sum((moment_3_predictions - log(data$R_moment_3))^2)
+rsq <- 1 - rss/tss
+rsq
+
+mean(mom_3_lasso_6_mse)
+```
+
+$$ log(\hat{R\_moment\_3}) = 3.759 + 1.226 \times log(St) - 40.168 \times Re + 11.415 \times Re^2 - 3.136 \times infinite \\ + 26.375 \times Re \times infinite - 6.686 \times Re^2 \times infinite $$
+
+MSE = 15.496
+
+$R^2$ = 0.5808
+
+
+## Moment 4
+
+### Modeling
+
+```{r CV-Moment 4}
+pred_4 <- model.matrix(log(R_moment_4) ~ log(St) + Re + Factor_Fr, data)[,-1]
+resp_4 <- log(data$R_moment_4)
+pred_4_int <- model.matrix(log(R_moment_4) ~ log(St) + Re + Factor_Fr +
+                             Re*Factor_Fr, data)[,-1]
+pred_4_int_LASSO <- model.matrix(log(R_moment_4) ~ log(St) + Re + Factor_Fr +
+                             log(St)*Re*Factor_Fr, data)[,-1]
+
+pred_4_poly <- model.matrix(log(R_moment_4) ~ log(St) + poly(Re, 2) +
+                              Factor_Fr, data)[,-1]
+pred_4_int_poly <- model.matrix(log(R_moment_4) ~ log(St) + poly(Re, 2) +
+                                  Factor_Fr + poly(Re, 2)*Factor_Fr, data)[,-1]
+pred_4_int_poly_LASSO <- model.matrix(log(R_moment_4) ~ log(St) + poly(Re, 2) +
+                           Factor_Fr + log(St)*poly(Re, 2)*Factor_Fr, data)[,-1]
+
+mom_4_lin_1_mse <- rep(0, 10)
+mom_4_lin_2_mse <- rep(0, 10)
+mom_4_lin_3_mse <- rep(0, 10)
+mom_4_lin_4_mse <- rep(0, 10)
+mom_4_lin_5_mse <- rep(0, 10)
+mom_4_lin_6_mse <- rep(0, 10)
+mom_4_lin_7_mse <- rep(0, 10)
+
+mom_4_ridge_1_mse <- rep(0, 10)
+mom_4_ridge_2_mse <- rep(0, 10)
+mom_4_lasso_1_mse <- rep(0, 10)
+mom_4_lasso_2_mse <- rep(0, 10)
+
+mom_4_poly_1_mse <- rep(0, 10)
+mom_4_poly_2_mse <- rep(0, 10)
+
+mom_4_ridge_3_mse <- rep(0, 10)
+mom_4_ridge_4_mse <- rep(0, 10)
+mom_4_lasso_3_mse <- rep(0, 10)
+mom_4_lasso_4_mse <- rep(0, 10)
+
+mom_4_lasso_5_mse <- rep(0, 10)
+mom_4_lasso_6_mse <- rep(0, 10)
+
+
+for(i in 1:10){
+  indices <- folds$splits[[i]][[2]]
+  correct_indices <- vector("logical", 89)
+  for(j in 1:89){
+    if(j %in% indices){
+      correct_indices[j] = T
+    } else{
+      correct_indices[j] = F
+    }
+  }
+  
+  data_tr <- data[correct_indices,]
+  data_test <- data[!correct_indices,]
+  
+  # Linear
+  mom_4_lin_1 <- lm(log(R_moment_4) ~ log(St) + Re, data_tr)
+  mom_4_lin_1_mse[i] <- mean((predict(mom_4_lin_1, data_test) -
+                                log(data_test$R_moment_4))^2)
+  mom_4_lin_2 <- lm(log(R_moment_4) ~ log(St) + Re + log(St)*Re, data_tr)
+  mom_4_lin_2_mse[i] <- mean((predict(mom_4_lin_2, data_test) -
+                                log(data_test$R_moment_3))^2)
+  mom_4_lin_3 <- lm(log(R_moment_4) ~ Re + Factor_Fr, data_tr)
+  mom_4_lin_3_mse[i] <- mean((predict(mom_4_lin_3, data_test) -
+                                log(data_test$R_moment_4))^2)
+  mom_4_lin_4 <- lm(log(R_moment_4) ~ Re + Factor_Fr + Re*Factor_Fr, data_tr)
+  mom_4_lin_4_mse[i] <- mean((predict(mom_4_lin_4, data_test) -
+                                log(data_test$R_moment_4))^2)
+  mom_4_lin_5 <- lm(log(R_moment_4) ~ log(St) + Re + Factor_Fr, data_tr)
+  mom_4_lin_5_mse[i] <- mean((predict(mom_4_lin_5, data_test) -
+                                log(data_test$R_moment_4))^2)
+  mom_4_lin_6 <- lm(log(R_moment_4) ~ log(St) + Re + Factor_Fr + Re*Factor_Fr,
+                    data_tr)
+  mom_4_lin_6_mse[i] <- mean((predict(mom_4_lin_6, data_test) -
+                                log(data_test$R_moment_4))^2)
+  mom_4_lin_7 <- lm(log(R_moment_4) ~ log(St) + Re + Factor_Fr +
+                      log(St)*Re*Factor_Fr, data_tr)
+  mom_4_lin_7_mse[i] <- mean((predict(mom_4_lin_7, data_test) -
+                                log(data_test$R_moment_4))^2)
+  
+  # Shrinkage
+  set.seed(1)
+  mom_4_ridge_1 <- glmnet(pred_4[correct_indices,], resp_4[correct_indices],
+                          alpha = 0, lambda = grid, thresh = 1e-12)
+  cv.out_m4_r1 <- cv.glmnet(pred_4[correct_indices,], resp_4[correct_indices],
+                         alpha = 0)
+  bestlam_m4_r1 <- cv.out_m4_r1$lambda.min
+  ridge.pred_m4_r1 <- predict(mom_4_ridge_1, s = bestlam_m4_r1,
+                           newx = pred_4[!correct_indices,])
+  mom_4_ridge_1_mse[i] <- mean((ridge.pred_m4_r1 - log(data_test$R_moment_4))^2)
+  
+  
+  mom_4_ridge_2 <- glmnet(pred_4_int[correct_indices,], resp_4[correct_indices],
+                          alpha = 0, lambda = grid,  thresh = 1e-12)
+  cv.out_m4_r2 <- cv.glmnet(pred_4_int[correct_indices,],
+                            resp_4[correct_indices], alpha = 0)
+  bestlam_m4_r2 <- cv.out_m4_r2$lambda.min
+  ridge.pred_m4_r2 <- predict(mom_4_ridge_2, s = bestlam_m4_r2,
+                           newx = pred_4_int[!correct_indices,])
+  mom_4_ridge_2_mse[i] <- mean((ridge.pred_m4_r2 - log(data_test$R_moment_4))^2)
+  
+  
+  set.seed(1)
+  mom_4_lasso_1 <- glmnet(pred_4[correct_indices,], resp_4[correct_indices],
+                          alpha = 1, lambda = grid)
+  cv.out_m4_l1 <- cv.glmnet(pred_4[correct_indices,], resp_4[correct_indices],
+                         alpha = 1)
+  bestlam_m4_l1 <- cv.out_m4_l1$lambda.min
+  lasso.pred_m4_l1 <- predict(mom_4_lasso_1, s = bestlam_m4_l1,
+                           newx = pred_4[!correct_indices,])
+  mom_4_lasso_1_mse[i] <- mean((lasso.pred_m4_l1 - log(data_test$R_moment_4))^2)
+  
+  mom_4_lasso_2 <- glmnet(pred_4_int_LASSO[correct_indices,],
+                          resp_4[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m4_l2 <- cv.glmnet(pred_4_int_LASSO[correct_indices,],
+                         resp_4[correct_indices], alpha = 1)
+  bestlam_m4_l2 <- cv.out_m4_l2$lambda.min
+  lasso.pred_m4_l2 <- predict(mom_4_lasso_2, s = bestlam_m4_l2,
+                           newx = pred_4_int_LASSO[!correct_indices,])
+  mom_4_lasso_2_mse[i] <- mean((lasso.pred_m4_l2 - log(data_test$R_moment_4))^2)
+  
+  # Polynomial
+  mom_4_poly_1 <- lm(log(R_moment_4) ~ poly(Re, 2) + log(St) + Factor_Fr,
+                     data_tr)
+  mom_4_poly_1_mse[i] <- mean((predict(mom_4_poly_1, data_test) -
+                                 log(data_test$R_moment_4))^2)
+  mom_4_poly_2 <- lm(log(R_moment_4) ~ poly(Re, 2) + log(St) + Factor_Fr +
+                    poly(Re, 2)*Factor_Fr, data_tr)
+  mom_4_poly_2_mse[i] <- mean((predict(mom_4_poly_2, data_test) - 
+                                 log(data_test$R_moment_4))^2)
+  
+  # Polynomial Shrinkage
+  set.seed(1)
+  mom_4_ridge_3 <- glmnet(pred_4_poly[correct_indices,], resp_4[correct_indices],
+                          alpha = 0, lambda = grid, thresh = 1e-12)
+  cv.out_m4_r3 <- cv.glmnet(pred_4_poly[correct_indices,],
+                            resp_4[correct_indices], alpha = 0)
+  bestlam_m4_r3 <- cv.out_m4_r3$lambda.min
+  ridge.pred_m4_r3 <- predict(mom_4_ridge_3, s = bestlam_m4_r3,
+                           newx = pred_4_poly[!correct_indices,])
+  mom_4_ridge_3_mse[i] <- mean((ridge.pred_m4_r3 - log(data_test$R_moment_4))^2)
+  
+  mom_4_ridge_4 <- glmnet(pred_4_int_poly[correct_indices,],
+                          resp_4[correct_indices], alpha = 0,
+                          lambda = grid, thresh = 1e-12)
+  cv.out_m4_r4 <- cv.glmnet(pred_4_int_poly[correct_indices,],
+                         resp_4[correct_indices], alpha = 0)
+  bestlam_m4_r4 <- cv.out_m4_r4$lambda.min
+  ridge.pred_m4_r4 <- predict(mom_4_ridge_4, s = bestlam_m4_r4,
+                           newx = pred_4_int_poly[!correct_indices,])
+  mom_4_ridge_4_mse[i] <- mean((ridge.pred_m4_r4 - log(data_test$R_moment_4))^2)
+  
+  
+  set.seed(1)
+  mom_4_lasso_3 <- glmnet(pred_4_poly[correct_indices,],
+                          resp_4[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m4_l3 <- cv.glmnet(pred_4_poly[correct_indices,],
+                         resp_4[correct_indices], alpha = 1)
+  bestlam_m4_l3 <- cv.out_m4_l3$lambda.min
+  lasso.pred_m4_l3 <- predict(mom_4_lasso_3, s = bestlam_m4_l3,
+                           newx = pred_4_poly[!correct_indices,])
+  mom_4_lasso_3_mse[i] <- mean((lasso.pred_m4_l3 - log(data_test$R_moment_4))^2)
+  
+  mom_4_lasso_4 <- glmnet(pred_4_int_poly_LASSO[correct_indices,],
+                          resp_4[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m4_l4 <- cv.glmnet(pred_4_int_poly_LASSO[correct_indices,],
+                         resp_4[correct_indices], alpha = 1)
+  bestlam_m4_l4 <- cv.out_m4_l4$lambda.min
+  lasso.pred_m4_l4 <- predict(mom_4_lasso_4, s = bestlam_m4_l4,
+                           newx = pred_4_int_poly_LASSO[!correct_indices,])
+  mom_4_lasso_4_mse[i] <- mean((lasso.pred_m4_l4 - log(data_test$R_moment_4))^2)
+  
+  
+  
+  
+  set.seed(1)
+  mom_4_lasso_5 <- glmnet(pred_4_int[correct_indices,],
+                          resp_4[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m4_l5 <- cv.glmnet(pred_4_int[correct_indices,],
+                         resp_4[correct_indices], alpha = 1)
+  bestlam_m4_l5 <- cv.out_m4_l5$lambda.min
+  lasso.pred_m4_l5 <- predict(mom_4_lasso_5, s = bestlam_m4_l5,
+                           newx = pred_4_int[!correct_indices,])
+  mom_4_lasso_5_mse[i] <- mean((lasso.pred_m4_l5 - log(data_test$R_moment_4))^2)
+  
+  mom_4_lasso_6 <- glmnet(pred_4_int_poly[correct_indices,],
+                          resp_4[correct_indices], alpha = 1, lambda = grid)
+  cv.out_m4_l6 <- cv.glmnet(pred_4_int_poly[correct_indices,],
+                         resp_4[correct_indices], alpha = 1)
+  bestlam_m4_l6 <- cv.out_m4_l6$lambda.min
+  lasso.pred_m4_l6 <- predict(mom_4_lasso_6, s = bestlam_m4_l6,
+                           newx = pred_4_int_poly[!correct_indices,])
+  mom_4_lasso_6_mse[i] <- mean((lasso.pred_m4_l6 - log(data_test$R_moment_4))^2)
+
+}
+```
+
+### Output
+
+```{r Mom-4-MSE-Output}
+get_se <- function(mse){
+  ret = 0
+  for(i in 1:10){
+    ret = ret + (mse[i] - mean(mse))^2
+  }
+  return(sqrt(ret / 9))
+}
+
+moment_4_mse <- data.frame(t(c(Model = "mom_4_lin_1", MSE = mean(mom_4_lin_1_mse),
+               SD = get_se(mom_4_lin_1_mse))))
+moment_4_mse <- rbind(moment_4_mse,
+                      c("mom_4_lin_2", mean(mom_4_lin_2_mse),
+                                      get_se(mom_4_lin_2_mse)),
+                      c("mom_4_lin_3", mean(mom_4_lin_3_mse),
+                                      get_se(mom_4_lin_3_mse)),
+                      c("mom_4_lin_4", mean(mom_4_lin_4_mse),
+                                      get_se(mom_4_lin_4_mse)),
+                      c("mom_4_lin_5", mean(mom_4_lin_5_mse),
+                                      get_se(mom_4_lin_5_mse)),
+                      c("mom_4_lin_6", mean(mom_4_lin_6_mse),
+                                      get_se(mom_4_lin_6_mse)),
+                      c("mom_4_lin_7", mean(mom_4_lin_7_mse),
+                                      get_se(mom_4_lin_7_mse)),
+                      c("mom_4_ridge_1", mean(mom_4_ridge_1_mse),
+                                      get_se(mom_4_ridge_1_mse)),
+                      c("mom_4_ridge_2", mean(mom_4_ridge_2_mse),
+                                      get_se(mom_4_ridge_2_mse)),
+                      c("mom_4_lasso_1", mean(mom_4_lasso_1_mse),
+                                      get_se(mom_4_lasso_1_mse)),
+                      c("mom_4_lasso_2", mean(mom_4_lasso_2_mse),
+                                      get_se(mom_4_lasso_2_mse)),
+                      c("mom_4_poly_1", mean(mom_4_poly_1_mse),
+                                      get_se(mom_4_poly_1_mse)),
+                      c("mom_4_poly_2", mean(mom_4_poly_2_mse),
+                                      get_se(mom_4_poly_2_mse)),
+                      c("mom_4_ridge_3", mean(mom_4_ridge_3_mse),
+                                      get_se(mom_4_ridge_3_mse)),
+                      c("mom_4_ridge_4", mean(mom_4_ridge_4_mse),
+                                      get_se(mom_4_ridge_4_mse)),
+                      c("mom_4_lasso_3", mean(mom_4_lasso_3_mse),
+                                      get_se(mom_4_lasso_3_mse)),
+                      c("mom_4_lasso_4", mean(mom_4_lasso_4_mse),
+                                      get_se(mom_4_lasso_4_mse)),
+                      c("mom_4_lasso_5", mean(mom_4_lasso_5_mse),
+                                      get_se(mom_4_lasso_5_mse)),
+                      c("mom_4_lasso_6", mean(mom_4_lasso_6_mse),
+                                      get_se(mom_4_lasso_6_mse)))
+
+moment_4_mse %>% 
+  arrange(MSE) %>% 
+  knitr::kable(digits = 3)
+```
+
+### Selection
+
+This time, mom_4_lasso_6 is the best model.
+
+```{r Moment-4-Final-Model}
+set.seed(325)
+moment_4_cv <- cv.glmnet(pred_4_int_poly, resp_4, alpha = 1)
+moment_4_bestlam <- moment_4_cv$lambda.min
+moment_4_bestlam
+
+moment_4 <- glmnet(pred_4_int_poly, resp_4, alpha = 1,
+                   lambda = moment_4_bestlam)
+
+coef(moment_4)
+
+moment_4_predictions <- predict(moment_4, moment_4_bestlam,
+                                newx = pred_4_int_poly)
+
+tss_m4 <- sum((log(data$R_moment_4) - mean(log(data$R_moment_4)))^2)
+rss_m4 <- sum((moment_4_predictions - log(data$R_moment_4))^2)
+rsq_m4 <- 1 - rss_m4/tss_m4
+rsq_m4
+
+mean(mom_4_lasso_6_mse)
+```
+
+$$ log(\hat{R\_moment\_4}) = 8.255 + 1.543 \times log(St) - 50.672 \times Re + 14.732 \times Re^2 - 4.694 \times infinite \\ + 38.427 \times Re \times infinite - 9.831 \times Re^2 \times infinite $$
